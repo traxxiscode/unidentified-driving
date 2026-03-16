@@ -25,6 +25,7 @@ var unidDash = (function () {
   var _openEventIdx    = null;   // index into _filteredEvents for the open panel
   var _selectedDriver  = null;   // { name, id } for the resolve panel
   var _bulkDriver      = null;
+  var _pendingOverrides = {};    // id -> {status,driver,annotation} — survives refresh
   var _hosRules        = ['Canada South 70h','Canada North 120h','US 60h/7d','US 70h/8d','Exempt'];
 
   /* ── Utilities ─────────────────────────────────────────── */
@@ -146,14 +147,18 @@ var unidDash = (function () {
     var container = document.getElementById('barChart');
     if (!container) return;
     var now = new Date();
+    // Build the 6 calendar-month slots correctly, rolling the year back when needed
     var months = [];
     for (var i = 5; i >= 0; i--) {
-      var d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-      months.push({ label: d.toLocaleString('default',{month:'short'}), year: d.getFullYear(), month: d.getMonth() });
+      var mIdx  = now.getMonth() - i;
+      var yIdx  = now.getFullYear();
+      while (mIdx < 0) { mIdx += 12; yIdx--; }
+      var d = new Date(yIdx, mIdx, 1);
+      months.push({ label: d.toLocaleString('default',{month:'short'}), year: yIdx, month: mIdx });
     }
     var data = months.map(function(m) {
       var me = _allEvents.filter(function(e) {
-        return e.dateObj.getFullYear()===m.year && e.dateObj.getMonth()===m.month;
+        return e.dateObj.getFullYear() === m.year && e.dateObj.getMonth() === m.month;
       });
       return {
         label:      m.label,
@@ -388,6 +393,19 @@ var unidDash = (function () {
     return lines;
   }
 
+  /* ── Apply saved resolution overrides after any data reload ── */
+  function applyOverrides() {
+    if (!Object.keys(_pendingOverrides).length) return;
+    _allEvents.forEach(function(e) {
+      if (_pendingOverrides[e.id]) {
+        var ov = _pendingOverrides[e.id];
+        e.status     = ov.status;
+        e.driver     = ov.driver;
+        e.annotation = ov.annotation;
+      }
+    });
+  }
+
   /* ── Geotab data loading ─────────────────────────────────── */
   function loadFromGeotab() {
     if (!_api) { loadDemoData(); return; }
@@ -437,6 +455,7 @@ var unidDash = (function () {
       };
     });
     _allEvents.sort(function(a,b){ return b.dateObj-a.dateObj; });
+    applyOverrides();
     render();
     toast('Loaded '+_allEvents.length+' events', '#10b981');
   }
@@ -463,8 +482,15 @@ var unidDash = (function () {
 
     _allEvents=[];
     for(var i=0;i<180;i++){
-      var daysBack=ri(0,180);
-      var dt=new Date(now-daysBack*86400000);
+      // Spread events evenly across the last 6 calendar months so every bar is populated.
+      // Pick a random month offset 0–5, then a random day within that calendar month.
+      var mOffset = Math.floor(i/30); // 0-5, 30 events per month
+      var mIdx  = now.getMonth() - mOffset;
+      var yIdx  = now.getFullYear();
+      while (mIdx < 0) { mIdx += 12; yIdx--; }
+      var daysInMonth = new Date(yIdx, mIdx+1, 0).getDate();
+      var day = ri(1, daysInMonth);
+      var dt  = new Date(yIdx, mIdx, day);
       var sh=ri(4,21),sm=ri(0,59),dur=ri(5,240);
       var distKm=+(dur*ro([0.4,0.5,0.6,0.7,0.8])).toFixed(1);
       var veh=ro(vDefs), st=ro(statusTypes);
@@ -479,6 +505,7 @@ var unidDash = (function () {
       });
     }
     _allEvents.sort(function(a,b){return b.dateObj-a.dateObj;});
+    applyOverrides();
     render();
   }
 
@@ -546,9 +573,15 @@ var unidDash = (function () {
     toggleTheme: function() { applyTheme(!_isLight); },
 
     refresh: function() {
+      // Snapshot any in-session resolution changes so they survive the reload
+      _allEvents.forEach(function(e) {
+        if (e.status !== 'unassigned' || e.driver || e.annotation) {
+          _pendingOverrides[e.id] = { status: e.status, driver: e.driver, annotation: e.annotation };
+        }
+      });
       _allEvents = [];
       var tbl = document.getElementById('tbl');
-      if (tbl) tbl.innerHTML = '<div class="box"><div class="spinner"></div><div class="msg-txt">LOADING…</div></div>';
+      if (tbl) tbl.innerHTML = '<div class="box"><div class="spinner"></div><div class="msg-txt">REFRESHING…</div></div>';
       loadFromGeotab();
     },
 
@@ -714,6 +747,9 @@ var unidDash = (function () {
       else if (_selectedDriver && !note) { e.status = 'assigned'; }
       else                               { e.status = 'annotated'; }
 
+      // persist so refresh doesn't lose this
+      _pendingOverrides[e.id] = { status: e.status, driver: e.driver, annotation: e.annotation };
+
       unidDash.closePanel();
       render();
       toast('Event resolved', '#10b981');
@@ -787,6 +823,8 @@ var unidDash = (function () {
         e.status  = 'assigned';
         e.checked = false;
         if (note) e.annotation = note;
+        // persist so refresh doesn't lose this
+        _pendingOverrides[e.id] = { status: e.status, driver: e.driver, annotation: e.annotation };
       });
       unidDash.closeBulkPanel();
       render();
