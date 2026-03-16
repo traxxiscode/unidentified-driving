@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Unidentified Driving — HOS Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="addin.css"/>
+</head>
+<body>
+
+<div id="unidentifieddriving" style="display:none;">
+
+  <!-- ── Suite Header Actions (hoisted into dashboard header by parent) ── -->
+  <div data-suite-actions style="display:none;">
+
+    <!-- Period filter chips -->
+    <div class="hdr-chips" id="periodChips">
+      <span class="hdr-chip" onclick="unidDash.setPeriod(1)">1M</span>
+      <span class="hdr-chip active" onclick="unidDash.setPeriod(3)">3M</span>
+      <span class="hdr-chip" onclick="unidDash.setPeriod(6)">6M</span>
+    </div>
+
+    <!-- Status filter chips -->
+    <div class="hdr-chips" id="statusChips">
+      <span class="hdr-chip active" onclick="unidDash.setStatus('all')">All</span>
+      <span class="hdr-chip warn" onclick="unidDash.setStatus('unassigned')">Unassigned</span>
+      <span class="hdr-chip" onclick="unidDash.setStatus('assigned')">Assigned</span>
+      <span class="hdr-chip" onclick="unidDash.setStatus('annotated')">Annotated</span>
+    </div>
+
+    <!-- Theme toggle -->
+    <div class="toggle-wrap" onclick="unidDash.toggleTheme()">
+      <div class="toggle-track"><div class="toggle-thumb"></div></div>
+      <span class="toggle-lbl" id="themeLbl">DARK</span>
+    </div>
+
+    <!-- Export button -->
+    <button class="btn" onclick="unidDash.exportCSV()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      Export
+    </button>
+
+    <!-- Assign Selected button -->
+    <button class="btn btn-primary" onclick="unidDash.openAssignAll()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+        <circle cx="9" cy="7" r="4"/>
+        <polyline points="16 11 18 13 22 9"/>
+      </svg>
+      Assign Selected
+    </button>
+
+    <!-- Refresh -->
+    <button class="btn" id="btnRefresh" onclick="unidDash.refresh()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+        <path d="M21 3v5h-5"/>
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+        <path d="M8 16H3v5"/>
+      </svg>
+      Refresh
+    </button>
+  </div><!-- /data-suite-actions -->
+
+  <!-- ── Inline subtitle / date context ── -->
+  <div class="sc-sub">
+    <p class="date-range" id="dateRange"></p>
+    <span class="badge-live" id="badgeLive">Live Feed</span>
+  </div>
+
+  <!-- ── KPI / Stat Cards ── -->
+  <div class="stat-grid">
+    <div class="stat-card red">
+      <div class="stat-top-bar"></div>
+      <div class="stat-label">Unidentified Events</div>
+      <div class="stat-value" id="statTotal">&#8212;</div>
+      <div class="stat-sub"><span class="trend up" id="statTrend1">&#8212;</span> vs last period</div>
+    </div>
+    <div class="stat-card yellow">
+      <div class="stat-top-bar"></div>
+      <div class="stat-label">Total Unid. Hours</div>
+      <div class="stat-value" id="statHours">&#8212;</div>
+      <div class="stat-sub"><span class="trend up">&#8212;</span> vs last period</div>
+    </div>
+    <div class="stat-card blue">
+      <div class="stat-top-bar"></div>
+      <div class="stat-label">Vehicles Affected</div>
+      <div class="stat-value" id="statVehicles">&#8212;</div>
+      <div class="stat-sub">of <span id="statFleet">&#8212;</span> fleet vehicles</div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-top-bar"></div>
+      <div class="stat-label">Assignments Made</div>
+      <div class="stat-value" id="statAssigned">&#8212;</div>
+      <div class="stat-sub"><span class="trend down">&#8212;</span> resolution rate</div>
+    </div>
+    <div class="stat-card purple">
+      <div class="stat-top-bar"></div>
+      <div class="stat-label">Annotations Added</div>
+      <div class="stat-value" id="statAnnotations">&#8212;</div>
+      <div class="stat-sub">across all events</div>
+    </div>
+  </div><!-- /.stat-grid -->
+
+  <!-- ── Charts Row ── -->
+  <div class="charts-row">
+    <!-- Bar Chart -->
+    <div class="chart-card">
+      <div class="chart-title">Monthly Unidentified Driving &#8212; Last 6 Months</div>
+      <div class="bar-chart" id="barChart"></div>
+      <div class="bar-legend">
+        <span class="legend-item"><span class="legend-dot" style="background:var(--red)"></span>Unassigned Events</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--blue)"></span>Assigned Events</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--purple)"></span>Annotated</span>
+      </div>
+    </div>
+    <!-- Donut Chart -->
+    <div class="chart-card">
+      <div class="chart-title">Resolution Breakdown</div>
+      <div class="donut-wrap">
+        <svg id="donutSvg" width="120" height="120" viewBox="0 0 120 120"></svg>
+        <div class="donut-labels" id="donutLabels"></div>
+      </div>
+    </div>
+  </div><!-- /.charts-row -->
+
+  <!-- ── Data Table ── -->
+  <div class="table-card">
+    <div class="table-header">
+      <span class="table-title">Unidentified Driving Events</span>
+      <div class="table-actions">
+        <input class="srch" id="searchBox" placeholder="Search vehicle / driver…" oninput="unidDash.filterTable()"/>
+      </div>
+    </div>
+
+    <div id="errBox"></div>
+
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="selectAll" onchange="unidDash.toggleSelectAll(this)"/></th>
+            <th class="sortable" onclick="unidDash.sortTable('vehicle')">Vehicle &#8597;</th>
+            <th class="sortable" onclick="unidDash.sortTable('date')">Date &#8597;</th>
+            <th class="sortable" onclick="unidDash.sortTable('start')">Start</th>
+            <th class="sortable" onclick="unidDash.sortTable('duration')">Duration &#8597;</th>
+            <th class="sortable" onclick="unidDash.sortTable('distance')">Distance &#8597;</th>
+            <th>HOS Rule</th>
+            <th>Status</th>
+            <th>Assigned Driver</th>
+            <th>Annotation</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <tr>
+            <td colspan="11">
+              <div class="box">
+                <div class="spinner"></div>
+                <div class="msg-txt">WAITING FOR GEOTAB&#8230;</div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination">
+      <span class="pagination-info" id="pageInfo">Showing 1&#8211;15 of &#8212;</span>
+      <div class="pagination-controls" id="pagination"></div>
+    </div>
+  </div><!-- /.table-card -->
+
+  <!-- ── Detail Drawer ── -->
+  <div class="modal-overlay" id="detailModal">
+    <div class="modal-drawer">
+      <div class="modal-header">
+        <span class="modal-title" id="drawerTitle">Event Detail</span>
+        <div class="modal-close" onclick="unidDash.closeDrawer()">&#10005;</div>
+      </div>
+      <div id="drawerContent"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div><!-- /#unidentifieddriving -->
+
+<script src="addin.js"></script>
+</body>
+</html>
