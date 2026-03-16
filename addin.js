@@ -364,8 +364,6 @@ var unidDash = (function () {
   function loadFromGeotab() {
     if (!_api) { loadDemoData(); return; }
     setErr('');
-    var now  = new Date();
-    var from = new Date(now - 6*30*86400000);
 
     // Step 1: fetch Devices and Users in parallel via multiCall,
     // mirroring the reference add-in's pattern exactly.
@@ -386,15 +384,16 @@ var unidDash = (function () {
         })
         .filter(function(u){ return u.name; });
 
-      // Step 2: fetch unidentified DutyStatusLogs
+      // Step 2: fetch unidentified DutyStatusLogs.
+      // userSearch id must be "NoUserId" — this is the correct Geotab identifier
+      // for logs with no assigned driver. No date filter on the search itself;
+      // we filter by date client-side using the period selector.
       _api.call('Get', {
         typeName: 'DutyStatusLog',
         search: {
-          fromDate:   from.toISOString(),
-          toDate:     now.toISOString(),
-          userSearch: { id: 'UnknownDriverId' }
+          userSearch: { id: 'NoUserId' }
         },
-        resultsLimit: 2000
+        resultsLimit: 1000
       }, function(logs) {
         if (!logs || !logs.length) {
           var tbl = document.getElementById('tbl');
