@@ -1,47 +1,50 @@
 /* =========================================================
    Unidentified Driving — HOS Dashboard  |  addin.js
    Geotab Add-in entry point: geotab.addin.unidentifieddriving
+
+   API write-back pattern:
+     - Assign driver : api.call("Set", { typeName:"DutyStatusLog",
+                         entity: { ...originalLog, driver:{ id:driverId } } })
+     - Add annotation: api.call("Add", { typeName:"AnnotationLog",
+                         entity: { comment, driver:{ id:currentUserId },
+                                   dateTime, dutyStatusLog:{ id:logId } } })
    ========================================================= */
 
 var unidDash = (function () {
 
   /* ── Private state ─────────────────────────────────────── */
-  var _api             = null;
-  var _currentPeriod   = 3;
-  var _currentStatus   = 'all';
-  var _currentSearch   = '';
-  var _groupFilter     = null;  // 'unassigned' | 'resolved' | 'vehicles'
-  var _sortKey         = 'date';
-  var _sortDir         = -1;
-  var _currentPage     = 1;
-  var _PER_PAGE        = 20;
-  var _filteredEvents  = [];
-  var _allEvents       = [];
-  var _vehicles        = [];
-  var _drivers         = [];
-  var _isLight         = false;
-  var _toastTimer      = null;
-  var _initialized     = false;
-  var _openEventIdx    = null;   // index into _filteredEvents for the open panel
-  var _selectedDriver  = null;   // { name, id } for the resolve panel
-  var _bulkDriver      = null;
-  var _pendingOverrides = {};    // id -> {status,driver,annotation} — survives refresh
-  var _hosRules        = ['Canada South 70h','Canada North 120h','US 60h/7d','US 70h/8d','Exempt'];
+  var _api            = null;
+  var _sessionUserId  = null;   // logged-in user id (for AnnotationLog author)
+  var _currentPeriod  = 3;
+  var _currentStatus  = 'all';
+  var _currentSearch  = '';
+  var _groupFilter    = null;
+  var _sortKey        = 'date';
+  var _sortDir        = -1;
+  var _currentPage    = 1;
+  var _PER_PAGE       = 20;
+  var _filteredEvents = [];
+  var _allEvents      = [];
+  var _vehicles       = [];
+  var _drivers        = [];     // [{ id, name }]
+  var _isLight        = false;
+  var _toastTimer     = null;
+  var _initialized    = false;
+  var _openEventIdx   = null;
+  var _selectedDriver = null;   // { id, name }
+  var _bulkDriver     = null;
+  var _saving         = false;
+  var _hosRules       = ['Canada South 70h','Canada North 120h','US 60h/7d','US 70h/8d','Exempt'];
 
   /* ── Utilities ─────────────────────────────────────────── */
   function pad(n) { return String(n).padStart(2, '0'); }
   function fmtDate(d) { return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()); }
   function fmtTime(h, m) { return pad(h) + ':' + pad(m); }
-  function fmtDur(m) {
-    var h = Math.floor(m/60), mm = m%60;
-    return h > 0 ? h + 'h ' + pad(mm) + 'm' : mm + 'm';
-  }
+  function fmtDur(m) { var h=Math.floor(m/60),mm=m%60; return h>0?h+'h '+pad(mm)+'m':mm+'m'; }
   function fmtDist(k) { return k + ' km'; }
-
   function initials(name) {
-    var parts = name.trim().split(/\s+/);
-    if (parts.length >= 2) return (parts[0][0] + parts[parts.length-1][0]).toUpperCase();
-    return name.slice(0,2).toUpperCase();
+    var p = name.trim().split(/\s+/);
+    return p.length>=2 ? (p[0][0]+p[p.length-1][0]).toUpperCase() : name.slice(0,2).toUpperCase();
   }
 
   function toast(msg, color) {
@@ -51,29 +54,28 @@ var unidDash = (function () {
     el.style.background = color || '#0C2853';
     el.classList.add('show');
     clearTimeout(_toastTimer);
-    _toastTimer = setTimeout(function () { el.classList.remove('show'); }, 3000);
+    _toastTimer = setTimeout(function(){ el.classList.remove('show'); }, 3500);
   }
 
   function setErr(msg) {
     var el = document.getElementById('errBox');
     if (!el) return;
-    if (msg) {
-      el.className = 'err-box';
-      el.textContent = msg;
-    } else {
-      el.className = '';
-      el.textContent = '';
-    }
+    el.className = msg ? 'err-box' : '';
+    el.textContent = msg || '';
+  }
+
+  function setSaving(on) {
+    _saving = on;
+    var btn = document.querySelector('#panelAssign .btn-save');
+    if (btn) { btn.textContent = on ? 'Saving…' : 'Save & Resolve'; btn.disabled = on; }
+    var btn2 = document.querySelector('#panelBulk .btn-save');
+    if (btn2) { btn2.textContent = on ? 'Saving…' : 'Apply to Selected'; btn2.disabled = on; }
   }
 
   /* ── Theme ─────────────────────────────────────────────── */
   function applyTheme(isLight) {
     _isLight = isLight;
-    if (isLight) {
-      document.body.classList.add('light');
-    } else {
-      document.body.classList.remove('light');
-    }
+    document.body.classList.toggle('light', isLight);
     var lbl = document.getElementById('themeLbl');
     if (lbl) lbl.textContent = isLight ? 'LIGHT' : 'DARK';
     drawDonut();
@@ -88,376 +90,381 @@ var unidDash = (function () {
     el.textContent = fmtDate(from) + '  →  ' + fmtDate(now);
   }
 
-  /* ── Filter helpers ─────────────────────────────────────── */
+  /* ── Filters ─────────────────────────────────────────────── */
   function getFiltered() {
-    var now    = new Date();
-    var cutoff = new Date(now - _currentPeriod * 30 * 86400000);
-    return _allEvents.filter(function (e) {
+    var cutoff = new Date(new Date() - _currentPeriod * 30 * 86400000);
+    return _allEvents.filter(function(e) {
       if (e.dateObj < cutoff) return false;
-
-      // header status filter
       if (_currentStatus === 'unassigned' && e.status !== 'unassigned') return false;
       if (_currentStatus === 'resolved'   && e.status === 'unassigned') return false;
-
-      // KPI group filter
-      if (_groupFilter === 'unassigned' && e.status !== 'unassigned') return false;
-      if (_groupFilter === 'resolved'   && e.status === 'unassigned') return false;
-
-      // search
+      if (_groupFilter   === 'unassigned' && e.status !== 'unassigned') return false;
+      if (_groupFilter   === 'resolved'   && e.status === 'unassigned') return false;
       if (_currentSearch) {
         var q = _currentSearch;
-        if (e.vehicle.toLowerCase().indexOf(q) === -1 &&
-            (e.driver||'').toLowerCase().indexOf(q) === -1 &&
-            e.id.toLowerCase().indexOf(q) === -1) return false;
+        if (e.vehicle.toLowerCase().indexOf(q)===-1 &&
+            (e.driver||'').toLowerCase().indexOf(q)===-1 &&
+            e.id.toLowerCase().indexOf(q)===-1) return false;
       }
       return true;
     });
   }
 
-  /* ── KPI update ─────────────────────────────────────────── */
-  function updateKPIs(evts) {
-    var now    = new Date();
-    var cutoff = new Date(now - _currentPeriod * 30 * 86400000);
+  /* ── KPIs ─────────────────────────────────────────────────── */
+  function updateKPIs() {
+    var cutoff = new Date(new Date() - _currentPeriod * 30 * 86400000);
     var period = _allEvents.filter(function(e){ return e.dateObj >= cutoff; });
-
     var totalMin = period.reduce(function(s,e){ return s+e.durationMin; }, 0);
     var vSet = {};
-    period.forEach(function(e){ vSet[e.vehicle] = true; });
-    var unassigned = period.filter(function(e){ return e.status === 'unassigned'; }).length;
-    var resolved   = period.filter(function(e){ return e.status !== 'unassigned'; }).length;
-
+    period.forEach(function(e){ vSet[e.vehicle]=true; });
     setText('kpiTotal',     period.length);
-    setText('kpiHours',     Math.floor(totalMin/60) + 'h');
+    setText('kpiHours',     Math.floor(totalMin/60)+'h');
     setText('kpiVehicles',  Object.keys(vSet).length);
-    setText('kpiFleetSub',  'of ' + _vehicles.length + ' fleet');
-    setText('kpiUnassigned',unassigned);
-    setText('kpiResolved',  resolved);
-
-    // foot
-    setText('foot', period.length + ' events · ' + Object.keys(vSet).length + ' vehicles · ' + _currentPeriod + '-month window');
+    setText('kpiFleetSub',  'of '+_vehicles.length+' fleet');
+    setText('kpiUnassigned',period.filter(function(e){ return e.status==='unassigned'; }).length);
+    setText('kpiResolved',  period.filter(function(e){ return e.status!=='unassigned'; }).length);
+    setText('foot', period.length+' events · '+Object.keys(vSet).length+' vehicles · '+_currentPeriod+'-month window');
   }
 
-  function setText(id, val) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = val;
-  }
+  function setText(id, val) { var el=document.getElementById(id); if(el) el.textContent=val; }
 
-  /* ── Bar Chart ──────────────────────────────────────────── */
+  /* ── Bar Chart ───────────────────────────────────────────── */
   function drawBarChart() {
     var container = document.getElementById('barChart');
     if (!container) return;
-    var now = new Date();
-    // Build the 6 calendar-month slots correctly, rolling the year back when needed
-    var months = [];
-    for (var i = 5; i >= 0; i--) {
-      var mIdx  = now.getMonth() - i;
-      var yIdx  = now.getFullYear();
-      while (mIdx < 0) { mIdx += 12; yIdx--; }
-      var d = new Date(yIdx, mIdx, 1);
-      months.push({ label: d.toLocaleString('default',{month:'short'}), year: yIdx, month: mIdx });
+    var now = new Date(), months = [];
+    for (var i=5; i>=0; i--) {
+      var mIdx=now.getMonth()-i, yIdx=now.getFullYear();
+      while (mIdx<0) { mIdx+=12; yIdx--; }
+      months.push({ label:new Date(yIdx,mIdx,1).toLocaleString('default',{month:'short'}), year:yIdx, month:mIdx });
     }
     var data = months.map(function(m) {
-      var me = _allEvents.filter(function(e) {
-        return e.dateObj.getFullYear() === m.year && e.dateObj.getMonth() === m.month;
-      });
-      return {
-        label:      m.label,
+      var me = _allEvents.filter(function(e){ return e.dateObj.getFullYear()===m.year && e.dateObj.getMonth()===m.month; });
+      return { label:m.label,
         unassigned: me.filter(function(e){ return e.status==='unassigned'; }).length,
-        assigned:   me.filter(function(e){ return e.status==='assigned'; }).length,
-        annotated:  me.filter(function(e){ return e.status==='annotated'; }).length
-      };
+        assigned:   me.filter(function(e){ return e.status==='assigned';   }).length,
+        annotated:  me.filter(function(e){ return e.status==='annotated';  }).length };
     });
     var maxVal = Math.max.apply(null, data.map(function(d){ return d.unassigned+d.assigned+d.annotated; }).concat([1]));
     container.innerHTML = '';
     data.forEach(function(d) {
-      var unH = Math.round((d.unassigned/maxVal)*100);
-      var asH = Math.round((d.assigned/maxVal)*100);
-      var anH = Math.round((d.annotated/maxVal)*100);
-      container.innerHTML += '<div class="bar-group">' +
-        '<div class="bar-wrap">' +
-          '<div class="bar" style="background:var(--score-red);height:'+unH+'%" data-tip="'+d.unassigned+' unassigned"></div>' +
-          '<div class="bar" style="background:var(--accent);height:'+asH+'%" data-tip="'+d.assigned+' assigned"></div>' +
-          '<div class="bar" style="background:var(--accent-hi);height:'+anH+'%" data-tip="'+d.annotated+' annotated"></div>' +
-        '</div>' +
-        '<span class="bar-month">'+d.label+'</span>' +
-      '</div>';
+      var uH=Math.round(d.unassigned/maxVal*100), aH=Math.round(d.assigned/maxVal*100), nH=Math.round(d.annotated/maxVal*100);
+      container.innerHTML += '<div class="bar-group"><div class="bar-wrap">' +
+        '<div class="bar" style="background:var(--score-red);height:'+uH+'%" data-tip="'+d.unassigned+' unassigned"></div>' +
+        '<div class="bar" style="background:var(--accent);height:'+aH+'%" data-tip="'+d.assigned+' assigned"></div>' +
+        '<div class="bar" style="background:var(--accent-hi);height:'+nH+'%" data-tip="'+d.annotated+' annotated"></div>' +
+        '</div><span class="bar-month">'+d.label+'</span></div>';
     });
   }
 
-  /* ── Donut Chart ─────────────────────────────────────────── */
+  /* ── Donut ───────────────────────────────────────────────── */
   function drawDonut() {
-    var now    = new Date();
-    var cutoff = new Date(now - _currentPeriod * 30 * 86400000);
-    var period = _allEvents.filter(function(e){ return e.dateObj >= cutoff; });
-    var u = period.filter(function(e){ return e.status==='unassigned'; }).length;
-    var a = period.filter(function(e){ return e.status==='assigned'; }).length;
-    var n = period.filter(function(e){ return e.status==='annotated'; }).length;
-    var total = (u+a+n)||1;
-
-    var segs = [
-      { val:u, color:'var(--score-red)', hex:'#ef4444', label:'Unassigned' },
-      { val:a, color:'var(--accent)',    hex:'#c8102e', label:'Assigned'   },
-      { val:n, color:'var(--accent-hi)', hex:'#e8334a', label:'Annotated'  }
-    ];
-
-    var cx=65, cy=65, r=50, ir=32, tau=Math.PI*2;
-    var start=0, paths='';
-    segs.forEach(function(s) {
-      var frac  = s.val/total;
-      var sweep = frac*tau;
-      var end   = start+sweep;
-      var x1=cx+r*Math.sin(start), y1=cy-r*Math.cos(start);
-      var x2=cx+r*Math.sin(end),   y2=cy-r*Math.cos(end);
-      var ix1=cx+ir*Math.sin(start),iy1=cy-ir*Math.cos(start);
-      var ix2=cx+ir*Math.sin(end),  iy2=cy-ir*Math.cos(end);
-      var lg = sweep>Math.PI?1:0;
-      if (frac>0.001) paths += '<path d="M'+x1+','+y1+' A'+r+','+r+' 0 '+lg+',1 '+x2+','+y2+' L'+ix2+','+iy2+' A'+ir+','+ir+' 0 '+lg+',0 '+ix1+','+iy1+' Z" fill="'+s.color+'" opacity=".88"/>';
-      start = end;
+    var cutoff = new Date(new Date() - _currentPeriod*30*86400000);
+    var period = _allEvents.filter(function(e){ return e.dateObj>=cutoff; });
+    var u=period.filter(function(e){ return e.status==='unassigned'; }).length;
+    var a=period.filter(function(e){ return e.status==='assigned';   }).length;
+    var n=period.filter(function(e){ return e.status==='annotated';  }).length;
+    var total=(u+a+n)||1;
+    var segs=[{val:u,color:'var(--score-red)',label:'Unassigned'},{val:a,color:'var(--accent)',label:'Assigned'},{val:n,color:'var(--accent-hi)',label:'Annotated'}];
+    var cx=65,cy=65,r=50,ir=32,tau=Math.PI*2,start=0,paths='';
+    segs.forEach(function(s){
+      var frac=s.val/total,sweep=frac*tau,end=start+sweep;
+      var x1=cx+r*Math.sin(start),y1=cy-r*Math.cos(start),x2=cx+r*Math.sin(end),y2=cy-r*Math.cos(end);
+      var ix1=cx+ir*Math.sin(start),iy1=cy-ir*Math.cos(start),ix2=cx+ir*Math.sin(end),iy2=cy-ir*Math.cos(end);
+      if(frac>0.001) paths+='<path d="M'+x1+','+y1+' A'+r+','+r+' 0 '+(sweep>Math.PI?1:0)+',1 '+x2+','+y2+' L'+ix2+','+iy2+' A'+ir+','+ir+' 0 '+(sweep>Math.PI?1:0)+',0 '+ix1+','+iy1+' Z" fill="'+s.color+'" opacity=".88"/>';
+      start=end;
     });
-    var fillText = _isLight ? '#051022' : '#e8edf5';
-    paths += '<text x="65" y="60" text-anchor="middle" font-family="DM Mono,monospace" font-size="20" font-weight="800" fill="'+fillText+'">'+total+'</text>';
-    paths += '<text x="65" y="74" text-anchor="middle" font-family="DM Mono,monospace" font-size="9" fill="#4d6d96" letter-spacing="1">EVENTS</text>';
-
-    var svg = document.getElementById('donutSvg');
-    if (svg) svg.innerHTML = paths;
-
-    var lblEl = document.getElementById('donutLabels');
-    if (lblEl) {
-      lblEl.innerHTML = segs.map(function(s) {
-        var pct = total > 0 ? Math.round(s.val/total*100) : 0;
-        return '<div class="donut-label-item">' +
-          '<span class="donut-dot" style="background:'+s.color+'"></span>' +
-          '<span>'+s.label+'</span>' +
-          '<span class="donut-pct" style="color:'+s.color+'">'+pct+'%</span>' +
-        '</div>';
-      }).join('');
-    }
+    var fc=_isLight?'#051022':'#e8edf5';
+    paths+='<text x="65" y="60" text-anchor="middle" font-family="DM Mono,monospace" font-size="20" font-weight="800" fill="'+fc+'">'+total+'</text>';
+    paths+='<text x="65" y="74" text-anchor="middle" font-family="DM Mono,monospace" font-size="9" fill="#4d6d96" letter-spacing="1">EVENTS</text>';
+    var svg=document.getElementById('donutSvg'); if(svg) svg.innerHTML=paths;
+    var lbl=document.getElementById('donutLabels');
+    if(lbl) lbl.innerHTML=segs.map(function(s){
+      return '<div class="donut-label-item"><span class="donut-dot" style="background:'+s.color+'"></span><span>'+s.label+'</span><span class="donut-pct" style="color:'+s.color+'">'+Math.round(s.val/total*100)+'%</span></div>';
+    }).join('');
   }
 
-  /* ── Table ──────────────────────────────────────────────── */
+  /* ── Table ───────────────────────────────────────────────── */
   function renderTable(evts) {
-    // sort
-    evts.sort(function(a,b) {
-      var va, vb;
-      if      (_sortKey==='vehicle')  { va=a.vehicle;     vb=b.vehicle; }
-      else if (_sortKey==='date')     { va=a.dateObj;     vb=b.dateObj; }
-      else if (_sortKey==='duration') { va=a.durationMin; vb=b.durationMin; }
-      else if (_sortKey==='distance') { va=a.distanceKm;  vb=b.distanceKm; }
-      else                            { va=a.start;       vb=b.start; }
-      if (va<vb) return -1*_sortDir;
-      if (va>vb) return  1*_sortDir;
-      return 0;
+    evts.sort(function(a,b){
+      var va,vb;
+      if(_sortKey==='vehicle'){va=a.vehicle;vb=b.vehicle;}
+      else if(_sortKey==='date'){va=a.dateObj;vb=b.dateObj;}
+      else if(_sortKey==='duration'){va=a.durationMin;vb=b.durationMin;}
+      else if(_sortKey==='distance'){va=a.distanceKm;vb=b.distanceKm;}
+      else{va=a.start;vb=b.start;}
+      return va<vb?-_sortDir:va>vb?_sortDir:0;
     });
     _filteredEvents = evts;
+    var start=(_currentPage-1)*_PER_PAGE, page=evts.slice(start,start+_PER_PAGE);
 
-    var start = (_currentPage-1)*_PER_PAGE;
-    var page  = evts.slice(start, start+_PER_PAGE);
+    var html='<table><thead><tr>'+
+      '<th class="th-check"><input type="checkbox" id="selectAll" onchange="unidDash.toggleSelectAll(this)"/></th>'+
+      '<th onclick="unidDash.sortBy(\'vehicle\')">Vehicle'+sa('vehicle')+'</th>'+
+      '<th onclick="unidDash.sortBy(\'date\')">Date'+sa('date')+'</th>'+
+      '<th onclick="unidDash.sortBy(\'start\')">Start</th>'+
+      '<th onclick="unidDash.sortBy(\'duration\')">Duration'+sa('duration')+'</th>'+
+      '<th onclick="unidDash.sortBy(\'distance\')">Distance'+sa('distance')+'</th>'+
+      '<th>HOS Rule</th>'+
+      '<th class="th-status">Status</th>'+
+      '<th>Driver</th>'+
+      '<th>Note</th>'+
+      '<th class="th-actions">Resolve</th>'+
+      '</tr></thead><tbody>';
 
-    var html = '<table>' +
-      '<thead><tr>' +
-        '<th class="th-check"><input type="checkbox" id="selectAll" onchange="unidDash.toggleSelectAll(this)"/></th>' +
-        '<th onclick="unidDash.sortBy(\'vehicle\')">Vehicle'+sortArrow('vehicle')+'</th>' +
-        '<th onclick="unidDash.sortBy(\'date\')">Date'+sortArrow('date')+'</th>' +
-        '<th onclick="unidDash.sortBy(\'start\')">Start</th>' +
-        '<th onclick="unidDash.sortBy(\'duration\')">Duration'+sortArrow('duration')+'</th>' +
-        '<th onclick="unidDash.sortBy(\'distance\')">Distance'+sortArrow('distance')+'</th>' +
-        '<th>HOS Rule</th>' +
-        '<th class="th-status">Status</th>' +
-        '<th>Driver</th>' +
-        '<th>Note</th>' +
-        '<th class="th-actions">Resolve</th>' +
-      '</tr></thead>' +
-      '<tbody>';
-
-    page.forEach(function(e, i) {
-      var idx     = start + i;
-      var pct     = Math.min(100, Math.round(e.durationMin/240*100));
-      var barClr  = pct>75 ? 'var(--score-red)' : pct>40 ? 'var(--score-yellow)' : 'var(--accent)';
-      var badge   = e.status==='unassigned'
-        ? '<span class="badge badge-unassigned">&#9888; Unassigned</span>'
-        : e.status==='assigned'
-        ? '<span class="badge badge-assigned">&#10003; Assigned</span>'
-        : '<span class="badge badge-annotated">&#9998; Annotated</span>';
-      var driverTxt = e.driver
-        ? '<span style="font-size:.8rem;font-weight:600;color:var(--text)">'+e.driver+'</span>'
-        : '<span style="color:var(--text3);font-size:.78rem;">—</span>';
-      var noteTxt = e.annotation
-        ? '<span class="note-cell" title="'+e.annotation+'">'+e.annotation+'</span>'
-        : '<span class="note-none">—</span>';
-      var resolveTxt = e.status==='unassigned' ? 'Resolve' : 'Edit';
-      var resolveClass = e.status==='unassigned' ? 'btn-resolve' : 'btn-resolve resolved';
-
-      html += '<tr class="'+(e.checked?'row-selected':'')+'">' +
-        '<td class="td-check"><input type="checkbox" '+(e.checked?'checked':'')+' onchange="unidDash.checkRow(this,'+idx+')"/></td>' +
-        '<td><div class="veh-cell"><span class="veh-dot" style="background:'+e.vehicleColor+'"></span><span class="veh-name">'+e.vehicle+'</span></div></td>' +
-        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.date+'</td>' +
-        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.start+'</td>' +
-        '<td><div class="dur-wrap"><span class="dur-txt">'+fmtDur(e.durationMin)+'</span><div class="dur-bar"><div class="dur-fill" style="width:'+pct+'%;background:'+barClr+'"></div></div></div></td>' +
-        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+fmtDist(e.distanceKm)+'</td>' +
-        '<td style="font-size:.75rem;color:var(--text3);">'+e.hosRule+'</td>' +
-        '<td class="td-status">'+badge+'</td>' +
-        '<td>'+driverTxt+'</td>' +
-        '<td>'+noteTxt+'</td>' +
-        '<td class="td-actions"><button class="'+resolveClass+'" onclick="unidDash.openPanel('+idx+')">'+resolveTxt+'</button></td>' +
-      '</tr>';
+    page.forEach(function(e,i){
+      var idx=start+i;
+      var pct=Math.min(100,Math.round(e.durationMin/240*100));
+      var bclr=pct>75?'var(--score-red)':pct>40?'var(--score-yellow)':'var(--accent)';
+      var badge=e.status==='unassigned'?'<span class="badge badge-unassigned">&#9888; Unassigned</span>':
+                e.status==='assigned'  ?'<span class="badge badge-assigned">&#10003; Assigned</span>':
+                                        '<span class="badge badge-annotated">&#9998; Annotated</span>';
+      var drvTxt=e.driver?'<span style="font-size:.8rem;font-weight:600;color:var(--text)">'+e.driver+'</span>':'<span style="color:var(--text3);font-size:.78rem;">—</span>';
+      var noteTxt=e.annotation?'<span class="note-cell" title="'+e.annotation.replace(/"/g,'&quot;')+'">'+e.annotation+'</span>':'<span class="note-none">—</span>';
+      var rLabel=e.status==='unassigned'?'Resolve':'Edit';
+      var rClass=e.status==='unassigned'?'btn-resolve':'btn-resolve resolved';
+      html+='<tr class="'+(e.checked?'row-selected':'')+'">' +
+        '<td class="td-check"><input type="checkbox" '+(e.checked?'checked':'')+' onchange="unidDash.checkRow(this,'+idx+')"/></td>'+
+        '<td><div class="veh-cell"><span class="veh-dot" style="background:'+e.vehicleColor+'"></span><span class="veh-name">'+e.vehicle+'</span></div></td>'+
+        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.date+'</td>'+
+        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.start+'</td>'+
+        '<td><div class="dur-wrap"><span class="dur-txt">'+fmtDur(e.durationMin)+'</span><div class="dur-bar"><div class="dur-fill" style="width:'+pct+'%;background:'+bclr+'"></div></div></div></td>'+
+        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+fmtDist(e.distanceKm)+'</td>'+
+        '<td style="font-size:.75rem;color:var(--text3);">'+e.hosRule+'</td>'+
+        '<td class="td-status">'+badge+'</td>'+
+        '<td>'+drvTxt+'</td>'+
+        '<td>'+noteTxt+'</td>'+
+        '<td class="td-actions"><button class="'+rClass+'" onclick="unidDash.openPanel('+idx+')">'+rLabel+'</button></td>'+
+        '</tr>';
     });
+    html+='</tbody></table>';
 
-    html += '</tbody></table>';
-
-    // pagination
-    var totalPages = Math.ceil(evts.length/_PER_PAGE) || 1;
-    html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-top:1px solid var(--border);">' +
-      '<span style="font-size:.72rem;font-family:\'DM Mono\',monospace;color:var(--text3);">' +
-        'Showing '+(evts.length?start+1:0)+'–'+Math.min(start+_PER_PAGE,evts.length)+' of '+evts.length +
-      '</span>' +
+    var tp=Math.ceil(evts.length/_PER_PAGE)||1;
+    html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-top:1px solid var(--border);">'+
+      '<span style="font-size:.72rem;font-family:\'DM Mono\',monospace;color:var(--text3);">Showing '+(evts.length?start+1:0)+'–'+Math.min(start+_PER_PAGE,evts.length)+' of '+evts.length+'</span>'+
       '<div style="display:flex;gap:4px;">';
-    html += '<button onclick="unidDash.goPage('+(_currentPage-1)+')" style="'+pageBtnStyle(false)+'">&#8249;</button>';
-    for (var p=1; p<=totalPages; p++) {
-      if (totalPages>7 && p>2 && p<totalPages-1 && Math.abs(p-_currentPage)>1) {
-        if (p===3||p===totalPages-2) html += '<span style="color:var(--text3);padding:0 4px;">…</span>';
-        continue;
-      }
-      html += '<button onclick="unidDash.goPage('+p+')" style="'+pageBtnStyle(p===_currentPage)+'">'+p+'</button>';
+    html+='<button onclick="unidDash.goPage('+(_currentPage-1)+')" style="'+pbs(false)+'">&#8249;</button>';
+    for(var p=1;p<=tp;p++){
+      if(tp>7&&p>2&&p<tp-1&&Math.abs(p-_currentPage)>1){if(p===3||p===tp-2)html+='<span style="color:var(--text3);padding:0 4px;">…</span>';continue;}
+      html+='<button onclick="unidDash.goPage('+p+')" style="'+pbs(p===_currentPage)+'">'+p+'</button>';
     }
-    html += '<button onclick="unidDash.goPage('+(_currentPage+1)+')" style="'+pageBtnStyle(false)+'">&#8250;</button>';
-    html += '</div></div>';
+    html+='<button onclick="unidDash.goPage('+(_currentPage+1)+')" style="'+pbs(false)+'">&#8250;</button></div></div>';
 
-    var tbl = document.getElementById('tbl');
-    if (tbl) tbl.innerHTML = html;
-
+    var tbl=document.getElementById('tbl'); if(tbl) tbl.innerHTML=html;
     updateBulkBtn();
   }
 
-  function pageBtnStyle(active) {
-    var base = 'width:28px;height:28px;border-radius:5px;cursor:pointer;font-family:\'DM Mono\',monospace;font-size:.75rem;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);transition:all .15s;';
-    if (active) return base + 'background:var(--accent);border-color:var(--accent);color:#fff;';
-    return base + 'background:var(--bg3);color:var(--text2);';
-  }
+  function sa(k){ return _sortKey!==k?'':' <i class="sort-arrow">'+(_sortDir===1?'↑':'↓')+'</i>'; }
+  function pbs(a){ var b='width:28px;height:28px;border-radius:5px;cursor:pointer;font-family:\'DM Mono\',monospace;font-size:.75rem;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);transition:all .15s;'; return a?b+'background:var(--accent);border-color:var(--accent);color:#fff;':b+'background:var(--bg3);color:var(--text2);'; }
 
-  function sortArrow(key) {
-    if (_sortKey !== key) return '';
-    return ' <i class="sort-arrow">'+ (_sortDir===1?'↑':'↓') +'</i>';
-  }
-
-  /* ── Full render ─────────────────────────────────────────── */
   function render() {
-    var evts = getFiltered();
-    updateKPIs(evts);
+    updateKPIs();
     drawBarChart();
     drawDonut();
-    renderTable(evts);
+    renderTable(getFiltered());
     updateDateRange();
     updateFilterBadge();
   }
 
   function updateFilterBadge() {
-    var el = document.getElementById('filterBadge');
-    if (!el) return;
+    var el=document.getElementById('filterBadge'); if(!el) return;
     if (_groupFilter) {
-      var labels = { unassigned:'Unassigned Only', resolved:'Resolved Only', vehicles:'Affected Vehicles' };
-      el.style.display = 'inline-flex';
-      el.className = 'filter-badge';
-      el.innerHTML = '<span class="filter-dot" style="background:var(--accent)"></span>' + (labels[_groupFilter]||_groupFilter) +
-        '<span class="filter-x" onclick="unidDash.clearGroupFilter()">&#10005;</span>';
-    } else {
-      el.style.display = 'none';
-    }
+      var labels={unassigned:'Unassigned Only',resolved:'Resolved Only',vehicles:'Affected Vehicles'};
+      el.style.display='inline-flex'; el.className='filter-badge';
+      el.innerHTML='<span class="filter-dot" style="background:var(--accent)"></span>'+(labels[_groupFilter]||_groupFilter)+'<span class="filter-x" onclick="unidDash.clearGroupFilter()">&#10005;</span>';
+    } else { el.style.display='none'; }
   }
 
-  /* ── Resolve Panel ───────────────────────────────────────── */
-  function buildDriverList(searchEl, dropdownEl, onSelect) {
-    var q = (searchEl.value || '').toLowerCase().trim();
-    var matched = q
-      ? _drivers.filter(function(d){ return d.toLowerCase().indexOf(q) !== -1; })
-      : _drivers.slice(0, 30);
+  function updateBulkBtn() {
+    var count=_allEvents.filter(function(e){ return e.checked; }).length;
+    var btn=document.getElementById('btnBulk'); if(!btn) return;
+    btn.style.display=count>0?'inline-flex':'none';
+    var c=document.getElementById('selCount'); if(c) c.textContent=count;
+  }
 
-    if (!matched.length) {
-      dropdownEl.innerHTML = '<div class="driver-no-results">No drivers found</div>';
+  /* ── Driver dropdown builder ─────────────────────────────── */
+  function buildDriverList(searchEl, dropdownEl, onSelect) {
+    var q=(searchEl.value||'').toLowerCase().trim();
+    var matched=q?_drivers.filter(function(d){ return d.name.toLowerCase().indexOf(q)!==-1; }):_drivers.slice(0,30);
+    if(!matched.length){
+      dropdownEl.innerHTML='<div class="driver-no-results">No drivers found</div>';
     } else {
-      dropdownEl.innerHTML = matched.map(function(d) {
-        return '<div class="driver-option" onclick="('+onSelect.toString()+')(\''+d.replace(/'/g,"\\'")+'\')">' +
-          '<span class="driver-avatar">'+initials(d)+'</span>'+d+'</div>';
+      dropdownEl.innerHTML=matched.map(function(d){
+        // Escape single quotes in the driver name for the inline onclick
+        var safeName=d.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        var safeId=d.id;
+        return '<div class="driver-option" onclick="('+onSelect.toString()+')(\''+safeId+'\',\''+safeName+'\')">'+
+          '<span class="driver-avatar">'+initials(d.name)+'</span>'+d.name+'</div>';
       }).join('');
     }
-    dropdownEl.style.display = 'block';
+    dropdownEl.style.display='block';
   }
 
-  function generateTimeline(dt, sh, sm, dur) {
-    var lines = [];
-    var base = new Date(dt); base.setHours(sh, sm, 0);
-    lines.push({ time: fmtTime(sh,sm)+' — Engine start', desc: 'Vehicle ignition detected, no driver card present', color:'var(--score-yellow)' });
-    var mid = new Date(base.getTime() + dur/2*60000);
-    lines.push({ time: fmtTime(mid.getHours(),mid.getMinutes())+' — Speed event', desc: 'Travelling '+(+(dur/2*0.6).toFixed(1))+' km from depot', color:'var(--accent)' });
-    var end = new Date(base.getTime() + dur*60000);
-    lines.push({ time: fmtTime(end.getHours(),end.getMinutes())+' — Engine off', desc: 'Vehicle stopped, event closed', color:'var(--score-red)' });
-    return lines;
+  /* ── Geotab API write-back ───────────────────────────────── */
+
+  /**
+   * Assign a driver to a DutyStatusLog by calling Set on the full log entity.
+   * We must send back the COMPLETE original log with the driver swapped —
+   * the Geotab API requires all fields present.
+   */
+  function apiAssignDriver(event, driverId, cb) {
+    if (!_api || !event._rawLog) { cb(null); return; }  // demo mode: skip
+    var updated = JSON.parse(JSON.stringify(event._rawLog));
+    updated.driver = { id: driverId };
+    _api.call('Set', { typeName: 'DutyStatusLog', entity: updated },
+      function() { cb(null); },
+      function(err) { cb(err); }
+    );
   }
 
-  /* ── Apply saved resolution overrides after any data reload ── */
-  function applyOverrides() {
-    if (!Object.keys(_pendingOverrides).length) return;
-    _allEvents.forEach(function(e) {
-      if (_pendingOverrides[e.id]) {
-        var ov = _pendingOverrides[e.id];
-        e.status     = ov.status;
-        e.driver     = ov.driver;
-        e.annotation = ov.annotation;
+  /**
+   * Add an AnnotationLog tied to a DutyStatusLog.
+   * The author is the currently logged-in user.
+   */
+  function apiAddAnnotation(event, comment, cb) {
+    if (!_api || !event._rawLog) { cb(null); return; }  // demo mode: skip
+    var authorId = _sessionUserId || 'b0';
+    _api.call('Add', {
+      typeName: 'AnnotationLog',
+      entity: {
+        comment:        comment,
+        driver:         { id: authorId },
+        dateTime:       new Date().toISOString(),
+        dutyStatusLog:  { id: event._rawLog.id }
       }
-    });
+    },
+    function() { cb(null); },
+    function(err) { cb(err); }
+    );
   }
 
-  /* ── Geotab data loading ─────────────────────────────────── */
+  /**
+   * Persist a single event: optionally Set driver, optionally Add annotation.
+   * Calls cb(err) when done (err=null on success).
+   */
+  function persistEvent(event, driverId, note, cb) {
+    var steps = [];
+
+    if (driverId && (!event._rawLog || event._rawLog.driver.id === 'UnknownDriverId')) {
+      steps.push(function(next) { apiAssignDriver(event, driverId, next); });
+    }
+    if (note) {
+      steps.push(function(next) { apiAddAnnotation(event, note, next); });
+    }
+
+    // run steps in sequence
+    function run(i) {
+      if (i >= steps.length) { cb(null); return; }
+      steps[i](function(err) { if (err) { cb(err); } else { run(i+1); } });
+    }
+    run(0);
+  }
+
+  /* ── Data loading ───────────────────────────────────────── */
+
   function loadFromGeotab() {
     if (!_api) { loadDemoData(); return; }
     setErr('');
     var now  = new Date();
     var from = new Date(now - 6*30*86400000);
 
+    // 1. Devices
     _api.call('Get', { typeName:'Device', resultsLimit:500 }, function(devices) {
       _vehicles = (devices||[]).map(function(d){ return { id:d.id, name:d.name||d.id }; });
-      setText('kpiFleetSub', 'of '+_vehicles.length+' fleet');
 
+      // 2. Users (drivers)
       _api.call('Get', { typeName:'User', resultsLimit:500 }, function(users) {
-        _drivers = (users||[]).map(function(u){
-          return ((u.firstName||'') + (u.lastName?' '+u.lastName:'')).trim() || u.name || u.id;
-        }).filter(Boolean);
+        _drivers = (users||[])
+          .filter(function(u){ return u.id !== 'UnknownDriverId'; })
+          .map(function(u){
+            var name = ((u.firstName||'')+(u.lastName?' '+u.lastName:'')).trim() || u.name || u.id;
+            return { id:u.id, name:name };
+          })
+          .filter(function(u){ return u.name; });
 
+        // 3. Unidentified DutyStatusLogs
         _api.call('Get', {
-          typeName: 'ExceptionEvent',
-          search: { fromDate:from.toISOString(), toDate:now.toISOString(), ruleName:'Unidentified Driver Activity' },
+          typeName: 'DutyStatusLog',
+          search: {
+            fromDate:     from.toISOString(),
+            toDate:       now.toISOString(),
+            userSearch:   { id: 'UnknownDriverId' }
+          },
           resultsLimit: 2000
-        }, function(events) {
-          if (!events||!events.length) { loadDemoData(); return; }
-          processExceptionEvents(events);
-        }, function() { loadDemoData(); });
-      }, function() { _drivers=[]; loadDemoData(); });
-    }, function() { loadDemoData(); });
+        }, function(logs) {
+          if (!logs || !logs.length) {
+            console.info('[UnidDash] No DutyStatusLog results; loading demo data.');
+            loadDemoData();
+            return;
+          }
+          processDutyStatusLogs(logs);
+        }, function(err) {
+          console.warn('[UnidDash] DutyStatusLog fetch failed:', err);
+          loadDemoData();
+        });
+
+      }, function(err) {
+        console.warn('[UnidDash] Users fetch failed:', err);
+        _drivers = [];
+        loadDemoData();
+      });
+    }, function(err) {
+      console.warn('[UnidDash] Devices fetch failed:', err);
+      loadDemoData();
+    });
   }
 
-  function processExceptionEvents(events) {
-    var palette = ['#ef4444','#f59e0b','#3a6bb5','#10b981','#c8102e','#e8334a','#60a5fa','#a78bfa','#34d399','#fb923c'];
-    var vColorMap = {}, colorIdx = 0;
-    _allEvents = events.map(function(evt, i) {
-      var dt    = new Date(evt.activeFrom||evt.dateTime);
-      var endDt = new Date(evt.activeTo||evt.dateTime);
-      var dur   = Math.max(1, Math.round((endDt-dt)/60000));
-      var vId   = (evt.device&&evt.device.id) ? evt.device.id : 'UNKNOWN';
+  function processDutyStatusLogs(logs) {
+    var palette=['#ef4444','#f59e0b','#3a6bb5','#10b981','#c8102e','#e8334a','#60a5fa','#a78bfa','#34d399','#fb923c'];
+    var vColorMap={}, colorIdx=0;
+
+    _allEvents = logs.map(function(log, i) {
+      var dt    = new Date(log.dateTime);
+      var endDt = log.endDateTime ? new Date(log.endDateTime) : new Date(dt.getTime() + 30*60000);
+      var dur   = Math.max(1, Math.round((endDt - dt) / 60000));
+      var vId   = log.device && log.device.id ? log.device.id : 'UNKNOWN';
+
       if (!vColorMap[vId]) { vColorMap[vId] = palette[colorIdx%palette.length]; colorIdx++; }
+
       var vName = vId;
-      for (var k=0;k<_vehicles.length;k++) { if (_vehicles[k].id===vId){ vName=_vehicles[k].name; break; } }
+      for (var k=0; k<_vehicles.length; k++) {
+        if (_vehicles[k].id === vId) { vName = _vehicles[k].name; break; }
+      }
+
+      // Determine resolved state from the log itself:
+      // If driver is not UnknownDriverId it was already assigned.
+      var isAssigned   = log.driver && log.driver.id !== 'UnknownDriverId';
+      var hasAnnotation= log.annotations && log.annotations.length > 0;
+      var status = isAssigned ? 'assigned' : hasAnnotation ? 'annotated' : 'unassigned';
+      var driverName = null;
+      if (isAssigned) {
+        for (var j=0; j<_drivers.length; j++) {
+          if (_drivers[j].id === log.driver.id) { driverName = _drivers[j].name; break; }
+        }
+        if (!driverName) driverName = log.driver.id;
+      }
+      var annotationText = hasAnnotation ? log.annotations[0].comment : null;
+
       return {
-        id: 'EVT-'+(10000+i), vehicle:vName, vehicleColor:vColorMap[vId],
-        date:fmtDate(dt), dateObj:dt, start:fmtTime(dt.getHours(),dt.getMinutes()),
-        durationMin:dur, distanceKm:+(dur*0.6).toFixed(1),
-        hosRule:(evt.rule&&evt.rule.name)||'Unidentified Driver',
-        status:'unassigned', driver:null, annotation:null, checked:false,
-        timeline:generateTimeline(dt,dt.getHours(),dt.getMinutes(),dur)
+        id:           'LOG-' + (i+1),
+        vehicle:      vName,
+        vehicleColor: vColorMap[vId],
+        date:         fmtDate(dt),
+        dateObj:      dt,
+        start:        fmtTime(dt.getHours(), dt.getMinutes()),
+        durationMin:  dur,
+        distanceKm:   log.odometer ? +(log.odometer/1000).toFixed(1) : +(dur*0.6).toFixed(1),
+        hosRule:      log.hosRuleSet || 'N/A',
+        status:       status,
+        driver:       driverName,
+        annotation:   annotationText,
+        checked:      false,
+        _rawLog:      log    // keep the full object for Set calls
       };
     });
-    _allEvents.sort(function(a,b){ return b.dateObj-a.dateObj; });
-    applyOverrides();
+
+    _allEvents.sort(function(a,b){ return b.dateObj - a.dateObj; });
     render();
-    toast('Loaded '+_allEvents.length+' events', '#10b981');
+    toast('Loaded ' + _allEvents.length + ' unidentified logs', '#10b981');
   }
 
   /* ── Demo data ───────────────────────────────────────────── */
@@ -470,11 +477,16 @@ var unidDash = (function () {
       {id:'VH-9043',color:'#34d399'},{id:'VH-0175',color:'#c8102e'}
     ];
     _vehicles = vDefs.map(function(v){ return {id:v.id,name:v.id}; });
-    _drivers  = ['J. Harrington','M. Delacroix','T. Okonkwo','S. Patel','R. Vasquez',
-                 'L. Nguyen','K. Brennan','D. Achebe','F. Morales','B. Nakamura'];
-    var annotations=['Vehicle taken home — approved yard move','Pre-trip inspection drive',
+    _drivers  = [
+      {id:'d1',name:'J. Harrington'},{id:'d2',name:'M. Delacroix'},
+      {id:'d3',name:'T. Okonkwo'},  {id:'d4',name:'S. Patel'},
+      {id:'d5',name:'R. Vasquez'},  {id:'d6',name:'L. Nguyen'},
+      {id:'d7',name:'K. Brennan'},  {id:'d8',name:'D. Achebe'},
+      {id:'d9',name:'F. Morales'},  {id:'d10',name:'B. Nakamura'}
+    ];
+    var anns=['Vehicle taken home — approved yard move','Pre-trip inspection drive',
       'Maintenance road test','Driver forgot to log in',
-      'ELD malfunction reported — manual logs filed','Authorized personal conveyance',null,null,null,null];
+      'ELD malfunction — manual logs filed','Authorized personal conveyance',null,null,null,null];
     var statusTypes=['unassigned','assigned','annotated'];
     var now=new Date();
     function ri(a,b){return a+Math.floor(Math.random()*(b-a+1));}
@@ -482,373 +494,261 @@ var unidDash = (function () {
 
     _allEvents=[];
     for(var i=0;i<180;i++){
-      // Spread events evenly across the last 6 calendar months so every bar is populated.
-      // Pick a random month offset 0–5, then a random day within that calendar month.
-      var mOffset = Math.floor(i/30); // 0-5, 30 events per month
-      var mIdx  = now.getMonth() - mOffset;
-      var yIdx  = now.getFullYear();
-      while (mIdx < 0) { mIdx += 12; yIdx--; }
-      var daysInMonth = new Date(yIdx, mIdx+1, 0).getDate();
-      var day = ri(1, daysInMonth);
-      var dt  = new Date(yIdx, mIdx, day);
+      var mOffset=Math.floor(i/30);
+      var mIdx=now.getMonth()-mOffset, yIdx=now.getFullYear();
+      while(mIdx<0){mIdx+=12;yIdx--;}
+      var dim=new Date(yIdx,mIdx+1,0).getDate();
+      var dt=new Date(yIdx,mIdx,ri(1,dim));
       var sh=ri(4,21),sm=ri(0,59),dur=ri(5,240);
-      var distKm=+(dur*ro([0.4,0.5,0.6,0.7,0.8])).toFixed(1);
       var veh=ro(vDefs), st=ro(statusTypes);
-      var ann=st==='annotated'?ro(annotations.filter(Boolean)):null;
+      var ann=st==='annotated'?ro(anns.filter(Boolean)):null;
       var drv=st==='assigned'?ro(_drivers):null;
       _allEvents.push({
-        id:'EVT-'+(10000+i),vehicle:veh.id,vehicleColor:veh.color,
+        id:'DEMO-'+(10000+i),vehicle:veh.id,vehicleColor:veh.color,
         date:fmtDate(dt),dateObj:dt,start:fmtTime(sh,sm),
-        durationMin:dur,distanceKm:distKm,hosRule:ro(_hosRules),
-        status:st,driver:drv,annotation:ann,checked:false,
-        timeline:generateTimeline(dt,sh,sm,dur)
+        durationMin:dur,distanceKm:+(dur*ro([0.4,0.5,0.6,0.7,0.8])).toFixed(1),
+        hosRule:ro(_hosRules),status:st,
+        driver:drv?drv.name:null,
+        annotation:ann,checked:false,
+        _rawLog:null  // no raw log in demo mode — API calls are skipped
       });
     }
     _allEvents.sort(function(a,b){return b.dateObj-a.dateObj;});
-    applyOverrides();
     render();
-  }
-
-  /* ── Bulk button visibility ──────────────────────────────── */
-  function updateBulkBtn() {
-    var count = _allEvents.filter(function(e){ return e.checked; }).length;
-    var btn   = document.getElementById('btnBulk');
-    var cntEl = document.getElementById('selCount');
-    if (!btn) return;
-    if (count>0) {
-      btn.style.display = 'inline-flex';
-      if (cntEl) cntEl.textContent = count;
-    } else {
-      btn.style.display = 'none';
-    }
   }
 
   /* ── Public API ──────────────────────────────────────────── */
   return {
 
-    init: function(api) {
-      _api = api;
-      var root = document.getElementById('unidentifieddriving');
-      if (root) root.style.display = '';
+    init: function(api, userId) {
+      _api           = api;
+      _sessionUserId = userId || null;
+      var root=document.getElementById('unidentifieddriving');
+      if (root) root.style.display='';
       if (!_initialized) {
-        _initialized = true;
-        // close driver dropdowns when clicking outside
-        document.addEventListener('click', function(e) {
-          var ds = document.getElementById('driverSearch');
-          var dd = document.getElementById('driverDropdown');
-          if (dd && ds && !ds.contains(e.target) && !dd.contains(e.target)) {
-            dd.style.display = 'none';
-          }
-          var bs = document.getElementById('bulkDriverSearch');
-          var bd = document.getElementById('bulkDriverDropdown');
-          if (bd && bs && !bs.contains(e.target) && !bd.contains(e.target)) {
-            bd.style.display = 'none';
-          }
+        _initialized=true;
+        document.addEventListener('click', function(ev) {
+          ['driverSearch','bulkDriverSearch'].forEach(function(sid){
+            var s=document.getElementById(sid);
+            var d=document.getElementById(sid.replace('Search','Dropdown'));
+            if(d&&s&&!s.contains(ev.target)&&!d.contains(ev.target)) d.style.display='none';
+          });
         });
       }
       loadFromGeotab();
     },
 
-    /* Header controls */
-    setPeriod: function(m, evt) {
-      _currentPeriod = m; _currentPage = 1;
-      if (evt) {
-        var grp = evt.target.closest('.range-group');
-        if (grp) grp.querySelectorAll('.range-btn').forEach(function(b){ b.classList.remove('active'); });
-        evt.target.classList.add('active');
-      }
+    /* ── Header controls ── */
+    setPeriod: function(m,evt) {
+      _currentPeriod=m; _currentPage=1;
+      if(evt){ var g=evt.target.closest('.range-group'); if(g) g.querySelectorAll('.range-btn').forEach(function(b){b.classList.remove('active');}); evt.target.classList.add('active'); }
       render();
     },
-
-    setStatus: function(s, evt) {
-      _currentStatus = s; _currentPage = 1;
-      if (evt) {
-        var grp = evt.target.closest('.range-group');
-        if (grp) grp.querySelectorAll('.range-btn').forEach(function(b){ b.classList.remove('active'); });
-        evt.target.classList.add('active');
-      }
+    setStatus: function(s,evt) {
+      _currentStatus=s; _currentPage=1;
+      if(evt){ var g=evt.target.closest('.range-group'); if(g) g.querySelectorAll('.range-btn').forEach(function(b){b.classList.remove('active');}); evt.target.classList.add('active'); }
       render();
     },
-
-    toggleTheme: function() { applyTheme(!_isLight); },
-
+    toggleTheme: function(){ applyTheme(!_isLight); },
     refresh: function() {
-      // Snapshot any in-session resolution changes so they survive the reload
-      _allEvents.forEach(function(e) {
-        if (e.status !== 'unassigned' || e.driver || e.annotation) {
-          _pendingOverrides[e.id] = { status: e.status, driver: e.driver, annotation: e.annotation };
-        }
-      });
-      _allEvents = [];
-      var tbl = document.getElementById('tbl');
-      if (tbl) tbl.innerHTML = '<div class="box"><div class="spinner"></div><div class="msg-txt">REFRESHING…</div></div>';
+      _allEvents=[];
+      var tbl=document.getElementById('tbl');
+      if(tbl) tbl.innerHTML='<div class="box"><div class="spinner"></div><div class="msg-txt">REFRESHING…</div></div>';
       loadFromGeotab();
     },
 
-    /* Table interactions */
-    filterSearch: function() {
-      _currentSearch = (document.getElementById('srch')||{}).value.toLowerCase()||'';
-      _currentPage = 1;
-      render();
-    },
-
-    sortBy: function(key) {
-      if (_sortKey===key) { _sortDir*=-1; } else { _sortKey=key; _sortDir=-1; }
-      render();
-    },
-
-    goPage: function(p) {
-      var total = Math.ceil(_filteredEvents.length/_PER_PAGE)||1;
-      if (p<1||p>total) return;
-      _currentPage=p; renderTable(_filteredEvents);
-    },
-
-    filterGroup: function(group) {
-      _groupFilter = (_groupFilter===group) ? null : group;
-      _currentPage = 1;
-      render();
-    },
-
-    clearGroupFilter: function() {
-      _groupFilter = null; _currentPage = 1; render();
-    },
-
-    toggleSelectAll: function(cb) {
-      var start = (_currentPage-1)*_PER_PAGE;
-      var page  = _filteredEvents.slice(start, start+_PER_PAGE);
-      page.forEach(function(e){ e.checked = cb.checked; });
+    /* ── Table controls ── */
+    filterSearch: function(){ _currentSearch=(document.getElementById('srch')||{}).value.toLowerCase()||''; _currentPage=1; render(); },
+    sortBy: function(k){ if(_sortKey===k){_sortDir*=-1;}else{_sortKey=k;_sortDir=-1;} render(); },
+    goPage: function(p){ var t=Math.ceil(_filteredEvents.length/_PER_PAGE)||1; if(p<1||p>t)return; _currentPage=p; renderTable(_filteredEvents); },
+    filterGroup: function(g){ _groupFilter=(_groupFilter===g)?null:g; _currentPage=1; render(); },
+    clearGroupFilter: function(){ _groupFilter=null; _currentPage=1; render(); },
+    toggleSelectAll: function(cb){
+      var start=(_currentPage-1)*_PER_PAGE;
+      _filteredEvents.slice(start,start+_PER_PAGE).forEach(function(e){ e.checked=cb.checked; });
       renderTable(_filteredEvents);
     },
+    checkRow: function(cb,idx){ if(_filteredEvents[idx]) _filteredEvents[idx].checked=cb.checked; updateBulkBtn(); },
 
-    checkRow: function(cb, idx) {
-      if (_filteredEvents[idx]) _filteredEvents[idx].checked = cb.checked;
-      updateBulkBtn();
-    },
-
-    /* ── Resolve Panel ── */
+    /* ── Resolve panel ── */
     openPanel: function(idx) {
-      var e = _filteredEvents[idx];
-      if (!e) return;
-      _openEventIdx   = idx;
-      _selectedDriver = e.driver ? { name: e.driver } : null;
+      var e=_filteredEvents[idx]; if(!e) return;
+      _openEventIdx=idx;
+      _selectedDriver = e.driver ? (function(){
+        for(var i=0;i<_drivers.length;i++){ if(_drivers[i].name===e.driver) return _drivers[i]; }
+        return { id:null, name:e.driver };
+      })() : null;
 
-      // populate meta
-      setText('panelEventId',   e.id);
-      setText('panelEventMeta', e.vehicle + '  ·  ' + e.date + '  ·  ' + e.start + '  ·  ' + fmtDur(e.durationMin) + '  ·  ' + fmtDist(e.distanceKm));
+      setText('panelEventId',  e.id);
+      setText('panelEventMeta', e.vehicle+' · '+e.date+' · '+e.start+' · '+fmtDur(e.durationMin)+' · '+fmtDist(e.distanceKm));
 
-      // driver search
-      var ds = document.getElementById('driverSearch');
-      var dd = document.getElementById('driverDropdown');
-      var sd = document.getElementById('selectedDriverDisplay');
-      var sn = document.getElementById('selectedDriverName');
-      if (ds) ds.value = '';
-      if (dd) dd.style.display = 'none';
-
-      if (_selectedDriver && sd && sn) {
-        sd.style.display = 'flex';
-        sn.textContent   = _selectedDriver.name;
-        if (ds) ds.style.display = 'none';
+      var ds=document.getElementById('driverSearch');
+      var dd=document.getElementById('driverDropdown');
+      var sd=document.getElementById('selectedDriverDisplay');
+      var sn=document.getElementById('selectedDriverName');
+      if(ds) ds.value='';
+      if(dd) dd.style.display='none';
+      if(_selectedDriver&&sd&&sn){
+        sd.style.display='flex'; sn.textContent=_selectedDriver.name;
+        if(ds) ds.style.display='none';
       } else {
-        if (sd) sd.style.display = 'none';
-        if (ds) ds.style.display = 'block';
+        if(sd) sd.style.display='none';
+        if(ds) ds.style.display='block';
       }
-
-      // annotation
-      var ta = document.getElementById('annotationNote');
-      if (ta) ta.value = e.annotation || '';
-
-      // reset preset chips
-      document.querySelectorAll('#presetChips .preset-chip').forEach(function(c){ c.classList.remove('active'); });
-      if (e.annotation) {
-        document.querySelectorAll('#presetChips .preset-chip').forEach(function(c){
-          if (c.textContent === e.annotation) c.classList.add('active');
-        });
-      }
-
-      var panel = document.getElementById('panelAssign');
-      if (panel) { panel.classList.add('open'); panel.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
-    },
-
-    closePanel: function() {
-      var panel = document.getElementById('panelAssign');
-      if (panel) panel.classList.remove('open');
-      _openEventIdx  = null;
-      _selectedDriver = null;
-    },
-
-    /* Driver search in resolve panel */
-    showDriverList: function() {
-      var ds = document.getElementById('driverSearch');
-      var dd = document.getElementById('driverDropdown');
-      if (!ds||!dd) return;
-      buildDriverList(ds, dd, function(name) {
-        unidDash.selectDriver(name);
+      var ta=document.getElementById('annotationNote'); if(ta) ta.value=e.annotation||'';
+      document.querySelectorAll('#presetChips .preset-chip').forEach(function(c){
+        c.classList.toggle('active', c.textContent===(e.annotation||''));
       });
+      var panel=document.getElementById('panelAssign');
+      if(panel){ panel.classList.add('open'); panel.scrollIntoView({behavior:'smooth',block:'nearest'}); }
     },
 
-    filterDriverList: function() {
-      var ds = document.getElementById('driverSearch');
-      var dd = document.getElementById('driverDropdown');
-      if (!ds||!dd) return;
-      buildDriverList(ds, dd, function(name) {
-        unidDash.selectDriver(name);
-      });
+    closePanel: function(){
+      var p=document.getElementById('panelAssign'); if(p) p.classList.remove('open');
+      _openEventIdx=null; _selectedDriver=null;
     },
 
-    selectDriver: function(name) {
-      _selectedDriver = { name: name };
-      var ds = document.getElementById('driverSearch');
-      var dd = document.getElementById('driverDropdown');
-      var sd = document.getElementById('selectedDriverDisplay');
-      var sn = document.getElementById('selectedDriverName');
-      if (dd) dd.style.display = 'none';
-      if (ds) { ds.value = ''; ds.style.display = 'none'; }
-      if (sn) sn.textContent = name;
-      if (sd) sd.style.display = 'flex';
+    showDriverList: function(){
+      var ds=document.getElementById('driverSearch'),dd=document.getElementById('driverDropdown');
+      if(ds&&dd) buildDriverList(ds,dd,function(id,name){ unidDash.selectDriver(id,name); });
+    },
+    filterDriverList: function(){
+      var ds=document.getElementById('driverSearch'),dd=document.getElementById('driverDropdown');
+      if(ds&&dd) buildDriverList(ds,dd,function(id,name){ unidDash.selectDriver(id,name); });
+    },
+    selectDriver: function(id,name){
+      _selectedDriver={id:id,name:name};
+      var ds=document.getElementById('driverSearch'),dd=document.getElementById('driverDropdown');
+      var sd=document.getElementById('selectedDriverDisplay'),sn=document.getElementById('selectedDriverName');
+      if(dd) dd.style.display='none';
+      if(ds){ ds.value=''; ds.style.display='none'; }
+      if(sn) sn.textContent=name;
+      if(sd) sd.style.display='flex';
+    },
+    clearDriver: function(){
+      _selectedDriver=null;
+      var ds=document.getElementById('driverSearch'),sd=document.getElementById('selectedDriverDisplay');
+      if(ds){ ds.value=''; ds.style.display='block'; }
+      if(sd) sd.style.display='none';
     },
 
-    clearDriver: function() {
-      _selectedDriver = null;
-      var ds = document.getElementById('driverSearch');
-      var sd = document.getElementById('selectedDriverDisplay');
-      if (ds) { ds.value = ''; ds.style.display = 'block'; }
-      if (sd) sd.style.display = 'none';
-    },
-
-    /* Annotation presets */
-    setPreset: function(chip) {
-      var ta = document.getElementById('annotationNote');
+    setPreset: function(chip){
+      var ta=document.getElementById('annotationNote');
       document.querySelectorAll('#presetChips .preset-chip').forEach(function(c){ c.classList.remove('active'); });
-      if (ta && ta.value === chip.textContent) {
-        ta.value = '';  // toggle off
-      } else {
-        chip.classList.add('active');
-        if (ta) ta.value = chip.textContent;
-      }
+      if(ta&&ta.value===chip.textContent){ ta.value=''; } else { chip.classList.add('active'); if(ta) ta.value=chip.textContent; }
     },
 
     saveResolve: function() {
-      if (_openEventIdx === null) return;
-      var e    = _filteredEvents[_openEventIdx];
-      if (!e) return;
-      var note = (document.getElementById('annotationNote')||{}).value || '';
-      note = note.trim();
+      if(_openEventIdx===null||_saving) return;
+      var e=_filteredEvents[_openEventIdx]; if(!e) return;
+      var note=((document.getElementById('annotationNote')||{}).value||'').trim();
+      if(!_selectedDriver&&!note){ toast('Assign a driver or add a note to resolve this event','#f59e0b'); return; }
 
-      if (!_selectedDriver && !note) {
-        toast('Assign a driver or add a note to resolve this event', '#f59e0b');
-        return;
-      }
+      setSaving(true);
+      var driverId   = _selectedDriver ? _selectedDriver.id : null;
+      var driverName = _selectedDriver ? _selectedDriver.name : null;
 
-      if (_selectedDriver) { e.driver = _selectedDriver.name; }
-      if (note)            { e.annotation = note; }
+      persistEvent(e, driverId, note, function(err) {
+        setSaving(false);
+        if (err) {
+          toast('Save failed: '+(err.message||err),'#ef4444');
+          setErr('Failed to save: '+(err.message||JSON.stringify(err)));
+          return;
+        }
+        // Update local state to reflect what was persisted
+        if (driverName) { e.driver=driverName; e.status='assigned'; }
+        if (note)       { e.annotation=note; if(!driverName) e.status='annotated'; }
+        if (e._rawLog && driverId) e._rawLog.driver = { id: driverId };
 
-      // determine resolved status
-      if (_selectedDriver && note)       { e.status = 'assigned'; }
-      else if (_selectedDriver && !note) { e.status = 'assigned'; }
-      else                               { e.status = 'annotated'; }
-
-      // persist so refresh doesn't lose this
-      _pendingOverrides[e.id] = { status: e.status, driver: e.driver, annotation: e.annotation };
-
-      unidDash.closePanel();
-      render();
-      toast('Event resolved', '#10b981');
-    },
-
-    /* ── Bulk Assign Panel ── */
-    openBulkPanel: function() {
-      var count = _allEvents.filter(function(e){ return e.checked; }).length;
-      if (!count) { toast('Select events first using the checkboxes', '#f59e0b'); return; }
-      setText('bulkCount', count + ' event' + (count!==1?'s':'') + ' selected');
-      _bulkDriver = null;
-      var bs = document.getElementById('bulkDriverSearch');
-      var bd = document.getElementById('bulkDriverDropdown');
-      var bsd = document.getElementById('bulkSelectedDisplay');
-      var bn  = document.getElementById('bulkNote');
-      if (bs)  { bs.value = ''; bs.style.display = 'block'; }
-      if (bd)  bd.style.display = 'none';
-      if (bsd) bsd.style.display = 'none';
-      if (bn)  bn.value = '';
-      var panel = document.getElementById('panelBulk');
-      if (panel) { panel.classList.add('open'); panel.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
-    },
-
-    closeBulkPanel: function() {
-      var panel = document.getElementById('panelBulk');
-      if (panel) panel.classList.remove('open');
-      _bulkDriver = null;
-    },
-
-    showBulkDriverList: function() {
-      var bs = document.getElementById('bulkDriverSearch');
-      var bd = document.getElementById('bulkDriverDropdown');
-      if (!bs||!bd) return;
-      buildDriverList(bs, bd, function(name) { unidDash.selectBulkDriver(name); });
-    },
-
-    filterBulkDriverList: function() {
-      var bs = document.getElementById('bulkDriverSearch');
-      var bd = document.getElementById('bulkDriverDropdown');
-      if (!bs||!bd) return;
-      buildDriverList(bs, bd, function(name) { unidDash.selectBulkDriver(name); });
-    },
-
-    selectBulkDriver: function(name) {
-      _bulkDriver = { name: name };
-      var bs  = document.getElementById('bulkDriverSearch');
-      var bd  = document.getElementById('bulkDriverDropdown');
-      var bsd = document.getElementById('bulkSelectedDisplay');
-      var bsn = document.getElementById('bulkSelectedName');
-      if (bd)  bd.style.display = 'none';
-      if (bs)  { bs.value=''; bs.style.display='none'; }
-      if (bsn) bsn.textContent = name;
-      if (bsd) bsd.style.display = 'flex';
-    },
-
-    clearBulkDriver: function() {
-      _bulkDriver = null;
-      var bs  = document.getElementById('bulkDriverSearch');
-      var bsd = document.getElementById('bulkSelectedDisplay');
-      if (bs)  { bs.value=''; bs.style.display='block'; }
-      if (bsd) bsd.style.display='none';
-    },
-
-    saveBulkAssign: function() {
-      if (!_bulkDriver) { toast('Select a driver first', '#f59e0b'); return; }
-      var note  = ((document.getElementById('bulkNote')||{}).value||'').trim();
-      var sel   = _allEvents.filter(function(e){ return e.checked; });
-      if (!sel.length) { toast('No events selected', '#f59e0b'); return; }
-      sel.forEach(function(e) {
-        e.driver  = _bulkDriver.name;
-        e.status  = 'assigned';
-        e.checked = false;
-        if (note) e.annotation = note;
-        // persist so refresh doesn't lose this
-        _pendingOverrides[e.id] = { status: e.status, driver: e.driver, annotation: e.annotation };
+        unidDash.closePanel();
+        render();
+        toast('Event resolved and saved','#10b981');
       });
-      unidDash.closeBulkPanel();
-      render();
-      toast('Assigned '+sel.length+' event'+(sel.length!==1?'s':'')+' to '+_bulkDriver.name, '#10b981');
     },
 
-    /* Export */
-    exportCSV: function() {
-      var evts = getFiltered();
-      if (!evts.length) { toast('No data to export', '#ef4444'); return; }
-      var hdr  = ['ID','Vehicle','Date','Start','Duration (min)','Distance (km)','HOS Rule','Status','Driver','Note'];
-      var rows = evts.map(function(e) {
+    /* ── Bulk panel ── */
+    openBulkPanel: function(){
+      var count=_allEvents.filter(function(e){ return e.checked; }).length;
+      if(!count){ toast('Select events first using the checkboxes','#f59e0b'); return; }
+      setText('bulkCount',count+' event'+(count!==1?'s':'')+' selected');
+      _bulkDriver=null;
+      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
+      var bsd=document.getElementById('bulkSelectedDisplay'),bn=document.getElementById('bulkNote');
+      if(bs){ bs.value=''; bs.style.display='block'; }
+      if(bd) bd.style.display='none';
+      if(bsd) bsd.style.display='none';
+      if(bn) bn.value='';
+      var p=document.getElementById('panelBulk');
+      if(p){ p.classList.add('open'); p.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+    },
+    closeBulkPanel: function(){
+      var p=document.getElementById('panelBulk'); if(p) p.classList.remove('open'); _bulkDriver=null;
+    },
+    showBulkDriverList: function(){
+      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
+      if(bs&&bd) buildDriverList(bs,bd,function(id,name){ unidDash.selectBulkDriver(id,name); });
+    },
+    filterBulkDriverList: function(){
+      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
+      if(bs&&bd) buildDriverList(bs,bd,function(id,name){ unidDash.selectBulkDriver(id,name); });
+    },
+    selectBulkDriver: function(id,name){
+      _bulkDriver={id:id,name:name};
+      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
+      var bsd=document.getElementById('bulkSelectedDisplay'),bsn=document.getElementById('bulkSelectedName');
+      if(bd) bd.style.display='none';
+      if(bs){ bs.value=''; bs.style.display='none'; }
+      if(bsn) bsn.textContent=name;
+      if(bsd) bsd.style.display='flex';
+    },
+    clearBulkDriver: function(){
+      _bulkDriver=null;
+      var bs=document.getElementById('bulkDriverSearch'),bsd=document.getElementById('bulkSelectedDisplay');
+      if(bs){ bs.value=''; bs.style.display='block'; }
+      if(bsd) bsd.style.display='none';
+    },
+
+    saveBulkAssign: function(){
+      if(!_bulkDriver||_saving){ toast('Select a driver first','#f59e0b'); return; }
+      var note=((document.getElementById('bulkNote')||{}).value||'').trim();
+      var sel=_allEvents.filter(function(e){ return e.checked; });
+      if(!sel.length){ toast('No events selected','#f59e0b'); return; }
+
+      setSaving(true);
+      var done=0, errors=0;
+      sel.forEach(function(e){
+        persistEvent(e, _bulkDriver.id, note, function(err){
+          if(err){ errors++; } else {
+            e.driver=_bulkDriver.name; e.status='assigned'; e.checked=false;
+            if(note) e.annotation=note;
+            if(e._rawLog) e._rawLog.driver={ id:_bulkDriver.id };
+          }
+          done++;
+          if(done===sel.length){
+            setSaving(false);
+            unidDash.closeBulkPanel();
+            render();
+            if(errors){ toast(errors+' save(s) failed — check console','#ef4444'); }
+            else { toast('Assigned '+sel.length+' event'+(sel.length!==1?'s':'')+' to '+_bulkDriver.name,'#10b981'); }
+          }
+        });
+      });
+    },
+
+    /* ── Export ── */
+    exportCSV: function(){
+      var evts=getFiltered(); if(!evts.length){ toast('No data to export','#ef4444'); return; }
+      var hdr=['ID','Vehicle','Date','Start','Duration (min)','Distance (km)','HOS Rule','Status','Driver','Note'];
+      var rows=evts.map(function(e){
         return [e.id,e.vehicle,e.date,e.start,e.durationMin,e.distanceKm,e.hosRule,e.status,e.driver||'',e.annotation||'']
           .map(function(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }).join(',');
       });
-      var csv  = [hdr.join(',')].concat(rows).join('\n');
-      var blob = new Blob([csv],{type:'text/csv'});
-      var url  = URL.createObjectURL(blob);
-      var a    = document.createElement('a');
-      a.href   = url;
-      a.download = 'unidentified-driving-'+new Date().toISOString().slice(0,10)+'.csv';
-      document.body.appendChild(a); a.click();
-      document.body.removeChild(a); URL.revokeObjectURL(url);
-      toast('CSV exported', '#10b981');
+      var csv=[hdr.join(',')].concat(rows).join('\n');
+      var blob=new Blob([csv],{type:'text/csv'});
+      var url=URL.createObjectURL(blob), a=document.createElement('a');
+      a.href=url; a.download='unidentified-driving-'+new Date().toISOString().slice(0,10)+'.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      toast('CSV exported','#10b981');
     }
   };
 })();
@@ -870,7 +770,9 @@ geotab.addin.unidentifieddriving = function () {
       _api   = freshApi;
       _state = freshState;
       _api.getSession(function (session) {
-        unidDash.init(_api, session.database);
+        // Pass both the api object and the logged-in userId so AnnotationLog
+        // can be authored correctly.
+        unidDash.init(_api, session.userId);
       });
     },
 
