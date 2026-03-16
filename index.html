@@ -4,29 +4,27 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Unidentified Driving — HOS Dashboard</title>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="addin.css"/>
 </head>
 <body>
 
 <div id="unidentifieddriving" style="display:none;">
 
-  <!-- ── Suite Header Actions (hoisted into dashboard header by parent) ── -->
+  <!-- ── Actions hoisted into the dashboard suite header by the parent ── -->
   <div data-suite-actions style="display:none;">
 
-    <!-- Period filter chips -->
-    <div class="hdr-chips" id="periodChips">
-      <span class="hdr-chip" onclick="unidDash.setPeriod(1)">1M</span>
-      <span class="hdr-chip active" onclick="unidDash.setPeriod(3)">3M</span>
-      <span class="hdr-chip" onclick="unidDash.setPeriod(6)">6M</span>
+    <!-- Period filter -->
+    <div class="range-group">
+      <button class="range-btn"        onclick="unidDash.setPeriod(1,event)">1M</button>
+      <button class="range-btn active" onclick="unidDash.setPeriod(3,event)">3M</button>
+      <button class="range-btn"        onclick="unidDash.setPeriod(6,event)">6M</button>
     </div>
 
-    <!-- Status filter chips -->
-    <div class="hdr-chips" id="statusChips">
-      <span class="hdr-chip active" onclick="unidDash.setStatus('all')">All</span>
-      <span class="hdr-chip warn" onclick="unidDash.setStatus('unassigned')">Unassigned</span>
-      <span class="hdr-chip" onclick="unidDash.setStatus('assigned')">Assigned</span>
-      <span class="hdr-chip" onclick="unidDash.setStatus('annotated')">Annotated</span>
+    <!-- Status filter -->
+    <div class="range-group">
+      <button class="range-btn active" onclick="unidDash.setStatus('all',event)">All</button>
+      <button class="range-btn"        onclick="unidDash.setStatus('unassigned',event)">Unassigned</button>
+      <button class="range-btn"        onclick="unidDash.setStatus('resolved',event)">Resolved</button>
     </div>
 
     <!-- Theme toggle -->
@@ -35,24 +33,14 @@
       <span class="toggle-lbl" id="themeLbl">DARK</span>
     </div>
 
-    <!-- Export button -->
+    <!-- Export -->
     <button class="btn" onclick="unidDash.exportCSV()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
         <polyline points="7 10 12 15 17 10"/>
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
-      Export
-    </button>
-
-    <!-- Assign Selected button -->
-    <button class="btn btn-primary" onclick="unidDash.openAssignAll()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-        <circle cx="9" cy="7" r="4"/>
-        <polyline points="16 11 18 13 22 9"/>
-      </svg>
-      Assign Selected
+      Export CSV
     </button>
 
     <!-- Refresh -->
@@ -67,126 +55,208 @@
     </button>
   </div><!-- /data-suite-actions -->
 
-  <!-- ── Inline subtitle / date context ── -->
+  <!-- ── Date range subtitle ── -->
   <div class="sc-sub">
     <p class="date-range" id="dateRange"></p>
-    <span class="badge-live" id="badgeLive">Live Feed</span>
+    <span class="live-badge">&#9679; Live</span>
   </div>
 
-  <!-- ── KPI / Stat Cards ── -->
-  <div class="stat-grid">
-    <div class="stat-card red">
-      <div class="stat-top-bar"></div>
-      <div class="stat-label">Unidentified Events</div>
-      <div class="stat-value" id="statTotal">&#8212;</div>
-      <div class="stat-sub"><span class="trend up" id="statTrend1">&#8212;</span> vs last period</div>
+  <!-- ── KPI Cards ── -->
+  <div class="kpis">
+    <div class="kpi">
+      <div class="kpi-top-bar" style="background:var(--accent2);"></div>
+      <div class="kpi-lbl">Unidentified Events</div>
+      <div class="kpi-val" id="kpiTotal" style="color:var(--accent2);">&#8212;</div>
+      <div class="kpi-sub">in period</div>
     </div>
-    <div class="stat-card yellow">
-      <div class="stat-top-bar"></div>
-      <div class="stat-label">Total Unid. Hours</div>
-      <div class="stat-value" id="statHours">&#8212;</div>
-      <div class="stat-sub"><span class="trend up">&#8212;</span> vs last period</div>
+    <div class="kpi">
+      <div class="kpi-top-bar" style="background:var(--accent);"></div>
+      <div class="kpi-lbl">Total Unid. Hours</div>
+      <div class="kpi-val" id="kpiHours" style="color:var(--accent);">&#8212;</div>
+      <div class="kpi-sub">driving time</div>
     </div>
-    <div class="stat-card blue">
-      <div class="stat-top-bar"></div>
-      <div class="stat-label">Vehicles Affected</div>
-      <div class="stat-value" id="statVehicles">&#8212;</div>
-      <div class="stat-sub">of <span id="statFleet">&#8212;</span> fleet vehicles</div>
+    <div class="kpi clickable" onclick="unidDash.filterGroup('vehicles')">
+      <div class="kpi-top-bar" style="background:#00e5ff;"></div>
+      <div class="kpi-lbl">Vehicles Affected</div>
+      <div class="kpi-val" id="kpiVehicles" style="color:#00e5ff;">&#8212;</div>
+      <div class="kpi-sub" id="kpiFleetSub">of &#8212; fleet</div>
+      <div class="kpi-hint">&#9654; Click to filter</div>
     </div>
-    <div class="stat-card green">
-      <div class="stat-top-bar"></div>
-      <div class="stat-label">Assignments Made</div>
-      <div class="stat-value" id="statAssigned">&#8212;</div>
-      <div class="stat-sub"><span class="trend down">&#8212;</span> resolution rate</div>
+    <div class="kpi clickable" onclick="unidDash.filterGroup('unassigned')">
+      <div class="kpi-top-bar" style="background:var(--score-red);"></div>
+      <div class="kpi-lbl">Unassigned</div>
+      <div class="kpi-val" id="kpiUnassigned" style="color:var(--score-red);">&#8212;</div>
+      <div class="kpi-sub">need attention</div>
+      <div class="kpi-hint">&#9654; Click to filter</div>
     </div>
-    <div class="stat-card purple">
-      <div class="stat-top-bar"></div>
-      <div class="stat-label">Annotations Added</div>
-      <div class="stat-value" id="statAnnotations">&#8212;</div>
-      <div class="stat-sub">across all events</div>
+    <div class="kpi clickable" onclick="unidDash.filterGroup('resolved')">
+      <div class="kpi-top-bar" style="background:var(--score-green);"></div>
+      <div class="kpi-lbl">Resolved</div>
+      <div class="kpi-val" id="kpiResolved" style="color:var(--score-green);">&#8212;</div>
+      <div class="kpi-sub">assigned or annotated</div>
+      <div class="kpi-hint">&#9654; Click to filter</div>
     </div>
-  </div><!-- /.stat-grid -->
+  </div><!-- /.kpis -->
 
   <!-- ── Charts Row ── -->
   <div class="charts-row">
-    <!-- Bar Chart -->
     <div class="chart-card">
-      <div class="chart-title">Monthly Unidentified Driving &#8212; Last 6 Months</div>
+      <div class="chart-ttl">Monthly Unidentified Driving — Last 6 Months</div>
       <div class="bar-chart" id="barChart"></div>
       <div class="bar-legend">
-        <span class="legend-item"><span class="legend-dot" style="background:var(--red)"></span>Unassigned Events</span>
-        <span class="legend-item"><span class="legend-dot" style="background:var(--blue)"></span>Assigned Events</span>
-        <span class="legend-item"><span class="legend-dot" style="background:var(--purple)"></span>Annotated</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--score-red)"></span>Unassigned</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--accent)"></span>Assigned</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--accent-hi)"></span>Annotated</span>
       </div>
     </div>
-    <!-- Donut Chart -->
     <div class="chart-card">
-      <div class="chart-title">Resolution Breakdown</div>
+      <div class="chart-ttl">Resolution Breakdown</div>
       <div class="donut-wrap">
-        <svg id="donutSvg" width="120" height="120" viewBox="0 0 120 120"></svg>
+        <svg id="donutSvg" width="130" height="130" viewBox="0 0 130 130"></svg>
         <div class="donut-labels" id="donutLabels"></div>
       </div>
     </div>
-  </div><!-- /.charts-row -->
+  </div>
 
-  <!-- ── Data Table ── -->
-  <div class="table-card">
-    <div class="table-header">
-      <span class="table-title">Unidentified Driving Events</span>
-      <div class="table-actions">
-        <input class="srch" id="searchBox" placeholder="Search vehicle / driver…" oninput="unidDash.filterTable()"/>
+  <!-- ── Resolve Panel ── -->
+  <div id="panelOverlay"></div>
+  <div class="panel" id="panelAssign">
+    <div class="panel-header">
+      <div class="panel-title">&#9998; Resolve Event</div>
+      <span class="panel-count" id="panelEventId"></span>
+      <button class="panel-close-btn" onclick="unidDash.closePanel()">&times;</button>
+    </div>
+    <div class="panel-desc" id="panelEventMeta"></div>
+
+    <div class="resolve-grid">
+      <!-- Driver assignment -->
+      <div class="resolve-col">
+        <div class="resolve-col-title">Assign Driver <span class="resolve-optional">(optional)</span></div>
+        <input
+          type="text"
+          class="sched-input"
+          id="driverSearch"
+          placeholder="Type to search drivers…"
+          autocomplete="off"
+          oninput="unidDash.filterDriverList()"
+          onfocus="unidDash.showDriverList()"
+        />
+        <div class="driver-dropdown" id="driverDropdown" style="display:none;"></div>
+        <div class="selected-driver" id="selectedDriverDisplay" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span id="selectedDriverName"></span>
+          <button class="clear-btn" onclick="unidDash.clearDriver()">&#10005;</button>
+        </div>
+      </div>
+
+      <!-- Annotation -->
+      <div class="resolve-col">
+        <div class="resolve-col-title">Annotation Note <span class="resolve-optional">(optional)</span></div>
+        <div class="preset-chips" id="presetChips">
+          <button class="preset-chip" onclick="unidDash.setPreset(this)">Vehicle taken home</button>
+          <button class="preset-chip" onclick="unidDash.setPreset(this)">Pre-trip inspection</button>
+          <button class="preset-chip" onclick="unidDash.setPreset(this)">Maintenance road test</button>
+          <button class="preset-chip" onclick="unidDash.setPreset(this)">Driver forgot to log in</button>
+          <button class="preset-chip" onclick="unidDash.setPreset(this)">ELD malfunction — manual logs filed</button>
+          <button class="preset-chip" onclick="unidDash.setPreset(this)">Authorized personal conveyance</button>
+        </div>
+        <textarea
+          class="sched-input resolve-textarea"
+          id="annotationNote"
+          placeholder="Describe why this trip was unidentified…"
+          rows="3"
+        ></textarea>
       </div>
     </div>
 
-    <div id="errBox"></div>
-
-    <div style="overflow-x:auto;">
-      <table>
-        <thead>
-          <tr>
-            <th><input type="checkbox" id="selectAll" onchange="unidDash.toggleSelectAll(this)"/></th>
-            <th class="sortable" onclick="unidDash.sortTable('vehicle')">Vehicle &#8597;</th>
-            <th class="sortable" onclick="unidDash.sortTable('date')">Date &#8597;</th>
-            <th class="sortable" onclick="unidDash.sortTable('start')">Start</th>
-            <th class="sortable" onclick="unidDash.sortTable('duration')">Duration &#8597;</th>
-            <th class="sortable" onclick="unidDash.sortTable('distance')">Distance &#8597;</th>
-            <th>HOS Rule</th>
-            <th>Status</th>
-            <th>Assigned Driver</th>
-            <th>Annotation</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="tableBody">
-          <tr>
-            <td colspan="11">
-              <div class="box">
-                <div class="spinner"></div>
-                <div class="msg-txt">WAITING FOR GEOTAB&#8230;</div>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+    <div class="panel-footer">
+      <div class="resolve-hint" id="resolveHint">Assign a driver, add a note, or both — at least one is required.</div>
+      <button class="btn" onclick="unidDash.closePanel()">Cancel</button>
+      <button class="btn btn-save" onclick="unidDash.saveResolve()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        Save &amp; Resolve
+      </button>
     </div>
+  </div><!-- /#panelAssign -->
 
-    <div class="pagination">
-      <span class="pagination-info" id="pageInfo">Showing 1&#8211;15 of &#8212;</span>
-      <div class="pagination-controls" id="pagination"></div>
+  <!-- ── Bulk Assign Panel ── -->
+  <div class="panel" id="panelBulk">
+    <div class="panel-header">
+      <div class="panel-title">&#9998; Bulk Assign Driver</div>
+      <span class="panel-count" id="bulkCount"></span>
+      <button class="panel-close-btn" onclick="unidDash.closeBulkPanel()">&times;</button>
     </div>
-  </div><!-- /.table-card -->
-
-  <!-- ── Detail Drawer ── -->
-  <div class="modal-overlay" id="detailModal">
-    <div class="modal-drawer">
-      <div class="modal-header">
-        <span class="modal-title" id="drawerTitle">Event Detail</span>
-        <div class="modal-close" onclick="unidDash.closeDrawer()">&#10005;</div>
+    <div class="panel-desc">Assign a single driver to all selected events. Any existing driver assignments will be overwritten.</div>
+    <div style="max-width:400px;">
+      <div style="margin-bottom:10px;">
+        <label class="field-lbl">Select Driver</label>
+        <input
+          type="text"
+          class="sched-input"
+          id="bulkDriverSearch"
+          placeholder="Type to search drivers…"
+          autocomplete="off"
+          oninput="unidDash.filterBulkDriverList()"
+          onfocus="unidDash.showBulkDriverList()"
+        />
+        <div class="driver-dropdown" id="bulkDriverDropdown" style="display:none;"></div>
+        <div class="selected-driver" id="bulkSelectedDisplay" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span id="bulkSelectedName"></span>
+          <button class="clear-btn" onclick="unidDash.clearBulkDriver()">&#10005;</button>
+        </div>
       </div>
-      <div id="drawerContent"></div>
+      <div>
+        <label class="field-lbl">Optional Note</label>
+        <textarea class="sched-input resolve-textarea" id="bulkNote" placeholder="Optional note applied to all selected events…" rows="2"></textarea>
+      </div>
+    </div>
+    <div class="panel-footer">
+      <button class="btn" onclick="unidDash.closeBulkPanel()">Cancel</button>
+      <button class="btn btn-save" onclick="unidDash.saveBulkAssign()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        Apply to Selected
+      </button>
+    </div>
+  </div><!-- /#panelBulk -->
+
+  <!-- ── Table section ── -->
+  <div class="sec-hdr">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span class="sec-ttl">Unidentified Driving Events</span>
+      <div id="filterBadge" style="display:none;"></div>
+    </div>
+    <div class="sec-right">
+      <input type="text" class="srch" id="srch" placeholder="Search vehicle…" oninput="unidDash.filterSearch()"/>
+      <button class="btn" id="btnBulk" onclick="unidDash.openBulkPanel()" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+        Bulk Assign (<span id="selCount">0</span>)
+      </button>
     </div>
   </div>
 
+  <div id="errBox"></div>
+  <div id="warnBox"></div>
+
+  <div class="tbl-wrap">
+    <div id="tbl">
+      <div class="box">
+        <div class="spinner"></div>
+        <div class="msg-txt">WAITING FOR GEOTAB…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot" id="foot"></div>
   <div class="toast" id="toast"></div>
 </div><!-- /#unidentifieddriving -->
 
