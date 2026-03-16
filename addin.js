@@ -367,49 +367,61 @@ var unidDash = (function () {
     var now  = new Date();
     var from = new Date(now - 6*30*86400000);
 
-    // 1. Devices
-    _api.call('Get', { typeName:'Device', resultsLimit:500 }, function(devices) {
-      _vehicles = (devices||[]).map(function(d){ return { id:d.id, name:d.name||d.id }; });
+    // Step 1: fetch Devices and Users in parallel via multiCall,
+    // mirroring the reference add-in's pattern exactly.
+    _api.multiCall([
+      ['Get', { typeName: 'Device', resultsLimit: 500 }],
+      ['Get', { typeName: 'User',   search: { isDriver: true }, resultsLimit: 1000 }]
+    ], function(res) {
+      var devices = (res && res[0]) || [];
+      var users   = (res && res[1]) || [];
 
-      // 2. Users (drivers)
-      _api.call('Get', { typeName:'User', resultsLimit:500 }, function(users) {
-        _drivers = (users||[])
-          .filter(function(u){ return u.id !== 'UnknownDriverId'; })
-          .map(function(u){
-            var name = ((u.firstName||'')+(u.lastName?' '+u.lastName:'')).trim() || u.name || u.id;
-            return { id:u.id, name:name };
-          })
-          .filter(function(u){ return u.name; });
+      _vehicles = devices.map(function(d){ return { id:d.id, name:d.name||d.id }; });
 
-        // 3. Unidentified DutyStatusLogs
-        _api.call('Get', {
-          typeName: 'DutyStatusLog',
-          search: {
-            fromDate:     from.toISOString(),
-            toDate:       now.toISOString(),
-            userSearch:   { id: 'UnknownDriverId' }
-          },
-          resultsLimit: 2000
-        }, function(logs) {
-          if (!logs || !logs.length) {
-            console.info('[UnidDash] No DutyStatusLog results; loading demo data.');
-            loadDemoData();
-            return;
-          }
-          processDutyStatusLogs(logs);
-        }, function(err) {
-          console.warn('[UnidDash] DutyStatusLog fetch failed:', err);
-          loadDemoData();
-        });
+      _drivers = users
+        .filter(function(u){ return u.id !== 'UnknownDriverId'; })
+        .map(function(u){
+          var name = ((u.firstName||'')+(u.lastName?' '+u.lastName:'')).trim() || u.name || '';
+          return { id:u.id, name:name };
+        })
+        .filter(function(u){ return u.name; });
 
+      // Step 2: fetch unidentified DutyStatusLogs
+      _api.call('Get', {
+        typeName: 'DutyStatusLog',
+        search: {
+          fromDate:   from.toISOString(),
+          toDate:     now.toISOString(),
+          userSearch: { id: 'UnknownDriverId' }
+        },
+        resultsLimit: 2000
+      }, function(logs) {
+        if (!logs || !logs.length) {
+          var tbl = document.getElementById('tbl');
+          if (tbl) tbl.innerHTML =
+            '<div class="box"><div class="msg-txt">No unidentified driving events found in the last 6 months.</div></div>';
+          updateKPIs();
+          drawBarChart();
+          drawDonut();
+          updateDateRange();
+          return;
+        }
+        processDutyStatusLogs(logs);
       }, function(err) {
-        console.warn('[UnidDash] Users fetch failed:', err);
-        _drivers = [];
-        loadDemoData();
+        var msg = err && err.message ? err.message : JSON.stringify(err);
+        setErr('Failed to load logs: ' + msg);
+        var tbl = document.getElementById('tbl');
+        if (tbl) tbl.innerHTML = '<div class="box"><div class="msg-txt">Error loading data — see above.</div></div>';
+        console.error('[UnidDash] DutyStatusLog fetch failed:', err);
       });
+
     }, function(err) {
-      console.warn('[UnidDash] Devices fetch failed:', err);
-      loadDemoData();
+      // multiCall failed — show the actual error rather than silently falling back
+      var msg = err && err.message ? err.message : JSON.stringify(err);
+      setErr('API error: ' + msg);
+      var tbl = document.getElementById('tbl');
+      if (tbl) tbl.innerHTML = '<div class="box"><div class="msg-txt">Error loading data — see above.</div></div>';
+      console.error('[UnidDash] multiCall failed:', err);
     });
   }
 
@@ -520,9 +532,11 @@ var unidDash = (function () {
   /* ── Public API ──────────────────────────────────────────── */
   return {
 
-    init: function(api, userId) {
+    init: function(api, session) {
       _api           = api;
-      _sessionUserId = userId || null;
+      // session.userName is the logged-in user's name; session.userId is their id
+      // Both are used for AnnotationLog authorship.
+      _sessionUserId = session && session.userId ? session.userId : null;
       var root=document.getElementById('unidentifieddriving');
       if (root) root.style.display='';
       if (!_initialized) {
@@ -552,6 +566,7 @@ var unidDash = (function () {
     toggleTheme: function(){ applyTheme(!_isLight); },
     refresh: function() {
       _allEvents=[];
+      setErr('');
       var tbl=document.getElementById('tbl');
       if(tbl) tbl.innerHTML='<div class="box"><div class="spinner"></div><div class="msg-txt">REFRESHING…</div></div>';
       loadFromGeotab();
@@ -769,10 +784,10 @@ geotab.addin.unidentifieddriving = function () {
     focus: function (freshApi, freshState) {
       _api   = freshApi;
       _state = freshState;
+      // getSession provides the real authenticated session.
+      // Matches the reference add-in pattern exactly — call init here, not in initialize.
       _api.getSession(function (session) {
-        // Pass both the api object and the logged-in userId so AnnotationLog
-        // can be authored correctly.
-        unidDash.init(_api, session.userId);
+        unidDash.init(_api, session);
       });
     },
 
