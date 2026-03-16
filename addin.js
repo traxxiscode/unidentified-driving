@@ -392,8 +392,7 @@ var unidDash = (function () {
         typeName: 'DutyStatusLog',
         search: {
           userSearch: { id: 'NoUserId' }
-        },
-        resultsLimit: 1000
+        }
       }, function(logs) {
         if (!logs || !logs.length) {
           var tbl = document.getElementById('tbl');
