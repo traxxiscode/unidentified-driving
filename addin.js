@@ -368,8 +368,8 @@ var unidDash = (function () {
     // Step 1: fetch Devices and Users in parallel via multiCall,
     // mirroring the reference add-in's pattern exactly.
     _api.multiCall([
-      ['Get', { typeName: 'Device', resultsLimit: 500 }],
-      ['Get', { typeName: 'User',   search: { isDriver: true }, resultsLimit: 1000 }]
+      ['Get', { typeName: 'Device' }],
+      ['Get', { typeName: 'User',   search: { isDriver: true } }]
     ], function(res) {
       var devices = (res && res[0]) || [];
       var users   = (res && res[1]) || [];
@@ -391,7 +391,8 @@ var unidDash = (function () {
       _api.call('Get', {
         typeName: 'DutyStatusLog',
         search: {
-          userSearch: { id: 'NoUserId' }
+          userSearch: { id: 'UnknownDriverId' },
+          statuses:   ['D']
         }
       }, function(logs) {
         if (!logs || !logs.length) {
