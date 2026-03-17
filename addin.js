@@ -344,7 +344,7 @@ var unidDash = (function () {
   function persistEvent(event, driverId, note, cb) {
     var steps = [];
 
-    if (driverId && (!event._rawLog || event._rawLog.driver.id === 'UnknownDriverId')) {
+    if (driverId && (!event._rawLog || event._rawLog.driver.id === 'NoUserId')) {
       steps.push(function(next) { apiAssignDriver(event, driverId, next); });
     }
     if (note) {
@@ -388,11 +388,17 @@ var unidDash = (function () {
       // userSearch id must be "NoUserId" — this is the correct Geotab identifier
       // for logs with no assigned driver. No date filter on the search itself;
       // we filter by date client-side using the period selector.
+      var now      = new Date();
+      var fromDate = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString();
+      var toDate   = now.toISOString();
+
       _api.call('Get', {
         typeName: 'DutyStatusLog',
         search: {
-          userSearch: { id: 'UnknownDriverId' },
-          statuses:   ['D']
+          userSearch: { id: 'NoUserId' },
+          statuses:   ['D'],
+          fromDate:   fromDate,
+          toDate:     toDate
         }
       }, function(logs) {
         if (!logs || !logs.length) {
@@ -443,7 +449,7 @@ var unidDash = (function () {
 
       // Determine resolved state from the log itself:
       // If driver is not UnknownDriverId it was already assigned.
-      var isAssigned   = log.driver && log.driver.id !== 'UnknownDriverId';
+      var isAssigned   = log.driver && log.driver.id !== 'NoUserId';
       var hasAnnotation= log.annotations && log.annotations.length > 0;
       var status = isAssigned ? 'assigned' : hasAnnotation ? 'annotated' : 'unassigned';
       var driverName = null;
