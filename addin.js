@@ -204,7 +204,6 @@ var unidDash = (function () {
       '<th onclick="unidDash.sortBy(\'start\')">Start</th>'+
       '<th onclick="unidDash.sortBy(\'duration\')">Duration'+sa('duration')+'</th>'+
       '<th onclick="unidDash.sortBy(\'distance\')">Distance'+sa('distance')+'</th>'+
-      '<th>HOS Rule</th>'+
       '<th class="th-status">Status</th>'+
       '<th>Driver</th>'+
       '<th>Note</th>'+
@@ -229,7 +228,6 @@ var unidDash = (function () {
         '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.start+'</td>'+
         '<td><div class="dur-wrap"><span class="dur-txt">'+fmtDur(e.durationMin)+'</span><div class="dur-bar"><div class="dur-fill" style="width:'+pct+'%;background:'+bclr+'"></div></div></div></td>'+
         '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+fmtDist(e.distanceKm)+'</td>'+
-        '<td style="font-size:.75rem;color:var(--text3);">'+e.hosRule+'</td>'+
         '<td class="td-status">'+badge+'</td>'+
         '<td>'+drvTxt+'</td>'+
         '<td>'+noteTxt+'</td>'+
@@ -449,7 +447,7 @@ var unidDash = (function () {
 
       // Determine resolved state from the log itself:
       // If driver is not UnknownDriverId it was already assigned.
-      var isAssigned   = log.driver && log.driver.id !== 'NoUserId';
+      var isAssigned   = log.driver && log.driver.id && log.driver.id !== 'NoUserId';
       var hasAnnotation= log.annotations && log.annotations.length > 0;
       var status = isAssigned ? 'assigned' : hasAnnotation ? 'annotated' : 'unassigned';
       var driverName = null;
@@ -758,9 +756,9 @@ var unidDash = (function () {
     /* ── Export ── */
     exportCSV: function(){
       var evts=getFiltered(); if(!evts.length){ toast('No data to export','#ef4444'); return; }
-      var hdr=['ID','Vehicle','Date','Start','Duration (min)','Distance (km)','HOS Rule','Status','Driver','Note'];
+      var hdr=['ID','Vehicle','Date','Start','Duration (min)','Distance (km)','Status','Driver','Note'];
       var rows=evts.map(function(e){
-        return [e.id,e.vehicle,e.date,e.start,e.durationMin,e.distanceKm,e.hosRule,e.status,e.driver||'',e.annotation||'']
+        return [e.id,e.vehicle,e.date,e.start,e.durationMin,e.distanceKm,e.status,e.driver||'',e.annotation||'']
           .map(function(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }).join(',');
       });
       var csv=[hdr.join(',')].concat(rows).join('\n');
