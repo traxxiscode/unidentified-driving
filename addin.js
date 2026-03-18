@@ -307,9 +307,16 @@ var unidDash = (function () {
     if (!_api || !event._rawLog) { cb(null); return; }  // demo mode: skip
     var updated = JSON.parse(JSON.stringify(event._rawLog));
     updated.driver = { id: driverId };
+    console.log('[UnidDash] Set DutyStatusLog payload:', JSON.stringify(updated, null, 2));
     _api.call('Set', { typeName: 'DutyStatusLog', entity: updated },
-      function() { cb(null); },
-      function(err) { cb(err); }
+      function(result) {
+        console.log('[UnidDash] Set DutyStatusLog success:', result);
+        cb(null);
+      },
+      function(err) {
+        console.error('[UnidDash] Set DutyStatusLog error:', JSON.stringify(err, null, 2));
+        cb(err);
+      }
     );
   }
 
@@ -797,5 +804,3 @@ geotab.addin.unidentifieddriving = function () {
     blur: function () {}
   };
 };
-
-//Hello
