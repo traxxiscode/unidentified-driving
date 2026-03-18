@@ -256,7 +256,6 @@ var unidDash = (function () {
 
   function render() {
     updateKPIs();
-    drawBarChart();
     drawDonut();
     renderTable(getFiltered());
     updateDateRange();
@@ -342,7 +341,7 @@ var unidDash = (function () {
   function persistEvent(event, driverId, note, cb) {
     var steps = [];
 
-    if (driverId && (!event._rawLog || event._rawLog.driver.id === 'NoUserId')) {
+    if (driverId) {
       steps.push(function(next) { apiAssignDriver(event, driverId, next); });
     }
     if (note) {
@@ -479,6 +478,7 @@ var unidDash = (function () {
 
     _allEvents.sort(function(a,b){ return b.dateObj - a.dateObj; });
     render();
+    drawBarChart();
     toast('Loaded ' + _allEvents.length + ' unidentified logs', '#10b981');
   }
 
