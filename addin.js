@@ -2,19 +2,17 @@
    Unidentified Driving — HOS Dashboard  |  addin.js
    Geotab Add-in entry point: geotab.addin.unidentifieddriving
 
-   API write-back pattern:
-     - Assign driver : api.call("Set", { typeName:"DutyStatusLog",
-                         entity: { ...originalLog, driver:{ id:driverId } } })
-     - Add annotation: api.call("Add", { typeName:"AnnotationLog",
-                         entity: { comment, driver:{ id:currentUserId },
-                                   dateTime, dutyStatusLog:{ id:logId } } })
+   NOTE: Geotab API does not allow driver assignment to
+   unidentified driving logs. Each row instead links directly
+   to the Geotab unidentifiedDriving page, pre-filtered to
+   show only that single log's date/time window.
    ========================================================= */
 
 var unidDash = (function () {
 
   /* ── Private state ─────────────────────────────────────── */
   var _api            = null;
-  var _sessionUserId  = null;   // logged-in user id (for AnnotationLog author)
+  var _sessionUserId  = null;
   var _currentPeriod  = 3;
   var _currentStatus  = 'all';
   var _currentSearch  = '';
@@ -26,26 +24,26 @@ var unidDash = (function () {
   var _filteredEvents = [];
   var _allEvents      = [];
   var _vehicles       = [];
-  var _drivers        = [];     // [{ id, name }]
   var _isLight        = false;
   var _toastTimer     = null;
   var _initialized    = false;
-  var _openEventIdx   = null;
-  var _selectedDriver = null;   // { id, name }
-  var _bulkDriver     = null;
-  var _saving         = false;
-  var _hosRules       = ['Canada South 70h','Canada North 120h','US 60h/7d','US 70h/8d','Exempt'];
+  var _geotabDatabase = null;   // populated from session for link building
+
+  /* ── Constants ──────────────────────────────────────────── */
+  var KM_TO_MI        = 0.621371;
+  var MIN_DIST_MI     = 0.25;   // events below this threshold are hidden
 
   /* ── Utilities ─────────────────────────────────────────── */
   function pad(n) { return String(n).padStart(2, '0'); }
   function fmtDate(d) { return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()); }
   function fmtTime(h, m) { return pad(h) + ':' + pad(m); }
   function fmtDur(m) { var h=Math.floor(m/60),mm=m%60; return h>0?h+'h '+pad(mm)+'m':mm+'m'; }
-  function fmtDist(k) { return k + ' km'; }
-  function initials(name) {
-    var p = name.trim().split(/\s+/);
-    return p.length>=2 ? (p[0][0]+p[p.length-1][0]).toUpperCase() : name.slice(0,2).toUpperCase();
-  }
+
+  /** Display distance in miles, rounded to 1 decimal place */
+  function fmtDist(mi) { return mi.toFixed(1) + ' mi'; }
+
+  /** Convert km to miles */
+  function kmToMi(km) { return +(km * KM_TO_MI).toFixed(2); }
 
   function toast(msg, color) {
     var el = document.getElementById('toast');
@@ -62,14 +60,6 @@ var unidDash = (function () {
     if (!el) return;
     el.className = msg ? 'err-box' : '';
     el.textContent = msg || '';
-  }
-
-  function setSaving(on) {
-    _saving = on;
-    var btn = document.querySelector('#panelAssign .btn-save');
-    if (btn) { btn.textContent = on ? 'Saving…' : 'Save & Resolve'; btn.disabled = on; }
-    var btn2 = document.querySelector('#panelBulk .btn-save');
-    if (btn2) { btn2.textContent = on ? 'Saving…' : 'Apply to Selected'; btn2.disabled = on; }
   }
 
   /* ── Theme ─────────────────────────────────────────────── */
@@ -90,6 +80,35 @@ var unidDash = (function () {
     el.textContent = fmtDate(from) + '  →  ' + fmtDate(now);
   }
 
+  /* ── Geotab deep-link builder ───────────────────────────── */
+  /**
+   * Build a my.geotab.com unidentifiedDriving URL that pre-filters to
+   * the exact log by setting both startDate and endDate to the log's
+   * dateTime (ISO 8601 UTC).  The vehicle id is appended so only that
+   * unit is shown.
+   *
+   * Example:
+   *   https://my.geotab.com/traxxisdemo/#unidentifiedDriving,
+   *     annotationsState:all,currentSortOrder:asc,
+   *     dateRange:(endDate:'2026-03-01T04:59:59.000Z',
+   *                startDate:'2026-02-01T05:00:00.000Z'),
+   *     minDistance:'0',vehicle:!(b13__)
+   */
+  function buildGeotabLink(event) {
+    var db   = _geotabDatabase || 'my';
+    var iso  = event.dateObj.toISOString();
+    var vId  = event._vehicleId || '';
+    // Encode the hash fragment manually — do NOT use encodeURIComponent on
+    // the whole fragment; Geotab parses the hash itself.
+    var hash = 'unidentifiedDriving' +
+      ',annotationsState:all' +
+      ',currentSortOrder:asc' +
+      ',dateRange:(endDate:\'' + iso + '\',startDate:\'' + iso + '\')' +
+      ',minDistance:\'0\'' +
+      (vId ? ',vehicle:!(' + vId + ')' : '');
+    return 'https://my.geotab.com/' + db + '/#' + hash;
+  }
+
   /* ── Filters ─────────────────────────────────────────────── */
   function getFiltered() {
     var cutoff = new Date(new Date() - _currentPeriod * 30 * 86400000);
@@ -102,7 +121,6 @@ var unidDash = (function () {
       if (_currentSearch) {
         var q = _currentSearch;
         if (e.vehicle.toLowerCase().indexOf(q)===-1 &&
-            (e.driver||'').toLowerCase().indexOf(q)===-1 &&
             e.id.toLowerCase().indexOf(q)===-1) return false;
       }
       return true;
@@ -190,7 +208,7 @@ var unidDash = (function () {
       if(_sortKey==='vehicle'){va=a.vehicle;vb=b.vehicle;}
       else if(_sortKey==='date'){va=a.dateObj;vb=b.dateObj;}
       else if(_sortKey==='duration'){va=a.durationMin;vb=b.durationMin;}
-      else if(_sortKey==='distance'){va=a.distanceKm;vb=b.distanceKm;}
+      else if(_sortKey==='distance'){va=a.distanceMi;vb=b.distanceMi;}
       else{va=a.start;vb=b.start;}
       return va<vb?-_sortDir:va>vb?_sortDir:0;
     });
@@ -198,40 +216,32 @@ var unidDash = (function () {
     var start=(_currentPage-1)*_PER_PAGE, page=evts.slice(start,start+_PER_PAGE);
 
     var html='<table><thead><tr>'+
-      '<th class="th-check"><input type="checkbox" id="selectAll" onchange="unidDash.toggleSelectAll(this)"/></th>'+
       '<th onclick="unidDash.sortBy(\'vehicle\')">Vehicle'+sa('vehicle')+'</th>'+
       '<th onclick="unidDash.sortBy(\'date\')">Date'+sa('date')+'</th>'+
       '<th onclick="unidDash.sortBy(\'start\')">Start</th>'+
       '<th onclick="unidDash.sortBy(\'duration\')">Duration'+sa('duration')+'</th>'+
       '<th onclick="unidDash.sortBy(\'distance\')">Distance'+sa('distance')+'</th>'+
       '<th class="th-status">Status</th>'+
-      '<th>Driver</th>'+
-      '<th>Note</th>'+
-      '<th class="th-actions">Resolve</th>'+
+      '<th class="th-actions">View</th>'+
       '</tr></thead><tbody>';
 
-    page.forEach(function(e,i){
-      var idx=start+i;
+    page.forEach(function(e){
       var pct=Math.min(100,Math.round(e.durationMin/240*100));
       var bclr=pct>75?'var(--score-red)':pct>40?'var(--score-yellow)':'var(--accent)';
       var badge=e.status==='unassigned'?'<span class="badge badge-unassigned">&#9888; Unassigned</span>':
                 e.status==='assigned'  ?'<span class="badge badge-assigned">&#10003; Assigned</span>':
                                         '<span class="badge badge-annotated">&#9998; Annotated</span>';
-      var drvTxt=e.driver?'<span style="font-size:.8rem;font-weight:600;color:var(--text)">'+e.driver+'</span>':'<span style="color:var(--text3);font-size:.78rem;">—</span>';
-      var noteTxt=e.annotation?'<span class="note-cell" title="'+e.annotation.replace(/"/g,'&quot;')+'">'+e.annotation+'</span>':'<span class="note-none">—</span>';
-      var rLabel=e.status==='unassigned'?'Resolve':'Edit';
-      var rClass=e.status==='unassigned'?'btn-resolve':'btn-resolve resolved';
-      html+='<tr class="'+(e.checked?'row-selected':'')+'">' +
-        '<td class="td-check"><input type="checkbox" '+(e.checked?'checked':'')+' onchange="unidDash.checkRow(this,'+idx+')"/></td>'+
+      var link = buildGeotabLink(e);
+      html+='<tr>' +
         '<td><div class="veh-cell"><span class="veh-dot" style="background:'+e.vehicleColor+'"></span><span class="veh-name">'+e.vehicle+'</span></div></td>'+
         '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.date+'</td>'+
         '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+e.start+'</td>'+
         '<td><div class="dur-wrap"><span class="dur-txt">'+fmtDur(e.durationMin)+'</span><div class="dur-bar"><div class="dur-fill" style="width:'+pct+'%;background:'+bclr+'"></div></div></div></td>'+
-        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+fmtDist(e.distanceKm)+'</td>'+
+        '<td style="font-family:\'DM Mono\',monospace;font-size:.8rem;">'+fmtDist(e.distanceMi)+'</td>'+
         '<td class="td-status">'+badge+'</td>'+
-        '<td>'+drvTxt+'</td>'+
-        '<td>'+noteTxt+'</td>'+
-        '<td class="td-actions"><button class="'+rClass+'" onclick="unidDash.openPanel('+idx+')">'+rLabel+'</button></td>'+
+        '<td class="td-actions"><a class="btn-view-log" href="'+link+'" target="_blank" rel="noopener noreferrer">'+
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>'+
+          'View</a></td>'+
         '</tr>';
     });
     html+='</tbody></table>';
@@ -248,7 +258,6 @@ var unidDash = (function () {
     html+='<button onclick="unidDash.goPage('+(_currentPage+1)+')" style="'+pbs(false)+'">&#8250;</button></div></div>';
 
     var tbl=document.getElementById('tbl'); if(tbl) tbl.innerHTML=html;
-    updateBulkBtn();
   }
 
   function sa(k){ return _sortKey!==k?'':' <i class="sort-arrow">'+(_sortDir===1?'↑':'↓')+'</i>'; }
@@ -271,127 +280,21 @@ var unidDash = (function () {
     } else { el.style.display='none'; }
   }
 
-  function updateBulkBtn() {
-    var count=_allEvents.filter(function(e){ return e.checked; }).length;
-    var btn=document.getElementById('btnBulk'); if(!btn) return;
-    btn.style.display=count>0?'inline-flex':'none';
-    var c=document.getElementById('selCount'); if(c) c.textContent=count;
-  }
-
-  /* ── Driver dropdown builder ─────────────────────────────── */
-  function buildDriverList(searchEl, dropdownEl, onSelect) {
-    var q=(searchEl.value||'').toLowerCase().trim();
-    var matched=q?_drivers.filter(function(d){ return d.name.toLowerCase().indexOf(q)!==-1; }):_drivers.slice(0,30);
-    if(!matched.length){
-      dropdownEl.innerHTML='<div class="driver-no-results">No drivers found</div>';
-    } else {
-      dropdownEl.innerHTML=matched.map(function(d){
-        // Escape single quotes in the driver name for the inline onclick
-        var safeName=d.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-        var safeId=d.id;
-        return '<div class="driver-option" onclick="('+onSelect.toString()+')(\''+safeId+'\',\''+safeName+'\')">'+
-          '<span class="driver-avatar">'+initials(d.name)+'</span>'+d.name+'</div>';
-      }).join('');
-    }
-    dropdownEl.style.display='block';
-  }
-
-  /* ── Geotab API write-back ───────────────────────────────── */
-
-  /**
-   * Assign a driver to a DutyStatusLog by calling Set on the full log entity.
-   * We must send back the COMPLETE original log with the driver swapped —
-   * the Geotab API requires all fields present.
-   */
-  function apiAssignDriver(event, driverId, cb) {
-    if (!_api || !event._rawLog) { cb(null); return; }  // demo mode: skip
-    var updated = JSON.parse(JSON.stringify(event._rawLog));
-    updated.driver = { id: driverId };
-    console.log('[UnidDash] Set DutyStatusLog payload:', JSON.stringify(updated, null, 2));
-    _api.call('Set', { typeName: 'DutyStatusLog', entity: updated },
-      function(result) {
-        console.log('[UnidDash] Set DutyStatusLog success:', result);
-        cb(null);
-      },
-      function(err) {
-        console.error('[UnidDash] Set DutyStatusLog error:', JSON.stringify(err, null, 2));
-        cb(err);
-      }
-    );
-  }
-
-  /**
-   * Add an AnnotationLog tied to a DutyStatusLog.
-   * The author is the currently logged-in user.
-   */
-  function apiAddAnnotation(event, comment, cb) {
-    if (!_api || !event._rawLog) { cb(null); return; }  // demo mode: skip
-    var authorId = _sessionUserId || 'b0';
-    _api.call('Add', {
-      typeName: 'AnnotationLog',
-      entity: {
-        comment:        comment,
-        driver:         { id: authorId },
-        dateTime:       new Date().toISOString(),
-        dutyStatusLog:  { id: event._rawLog.id }
-      }
-    },
-    function() { cb(null); },
-    function(err) { cb(err); }
-    );
-  }
-
-  /**
-   * Persist a single event: optionally Set driver, optionally Add annotation.
-   * Calls cb(err) when done (err=null on success).
-   */
-  function persistEvent(event, driverId, note, cb) {
-    var steps = [];
-
-    if (driverId) {
-      steps.push(function(next) { apiAssignDriver(event, driverId, next); });
-    }
-    if (note) {
-      steps.push(function(next) { apiAddAnnotation(event, note, next); });
-    }
-
-    // run steps in sequence
-    function run(i) {
-      if (i >= steps.length) { cb(null); return; }
-      steps[i](function(err) { if (err) { cb(err); } else { run(i+1); } });
-    }
-    run(0);
-  }
-
   /* ── Data loading ───────────────────────────────────────── */
 
   function loadFromGeotab() {
     if (!_api) { loadDemoData(); return; }
     setErr('');
 
-    // Step 1: fetch Devices and Users in parallel via multiCall,
-    // mirroring the reference add-in's pattern exactly.
     _api.multiCall([
       ['Get', { typeName: 'Device' }],
-      ['Get', { typeName: 'User',   search: { isDriver: true } }]
+      ['Get', { typeName: 'User', search: { isDriver: true } }]
     ], function(res) {
       var devices = (res && res[0]) || [];
       var users   = (res && res[1]) || [];
 
       _vehicles = devices.map(function(d){ return { id:d.id, name:d.name||d.id }; });
 
-      _drivers = users
-        .filter(function(u){ return u.id !== 'UnknownDriverId'; })
-        .map(function(u){
-          var name = ((u.firstName||'')+(u.lastName?' '+u.lastName:'')).trim() || u.name || '';
-          return { id:u.id, name:name };
-        })
-        .filter(function(u){ return u.name; });
-
-      // Step 2: fetch unidentified DutyStatusLogs.
-      // userSearch id must be "NoUserId" — this is the correct Geotab identifier
-      // for logs with no assigned driver. No date filter on the search itself;
-      // we filter by date client-side using the period selector.
       var now      = new Date();
       var fromDate = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString();
       var toDate   = now.toISOString();
@@ -425,7 +328,6 @@ var unidDash = (function () {
       });
 
     }, function(err) {
-      // multiCall failed — show the actual error rather than silently falling back
       var msg = err && err.message ? err.message : JSON.stringify(err);
       setErr('API error: ' + msg);
       var tbl = document.getElementById('tbl');
@@ -437,8 +339,10 @@ var unidDash = (function () {
   function processDutyStatusLogs(logs) {
     var palette=['#ef4444','#f59e0b','#3a6bb5','#10b981','#c8102e','#e8334a','#60a5fa','#a78bfa','#34d399','#fb923c'];
     var vColorMap={}, colorIdx=0;
+    var skipped = 0;
 
-    _allEvents = logs.map(function(log, i) {
+    var events = [];
+    logs.forEach(function(log, i) {
       var dt    = new Date(log.dateTime);
       var endDt = log.endDateTime ? new Date(log.endDateTime) : new Date(dt.getTime() + 30*60000);
       var dur   = Math.max(1, Math.round((endDt - dt) / 60000));
@@ -451,21 +355,18 @@ var unidDash = (function () {
         if (_vehicles[k].id === vId) { vName = _vehicles[k].name; break; }
       }
 
-      // Determine resolved state from the log itself:
-      // If driver is not UnknownDriverId it was already assigned.
+      // Convert odometer-based distance (metres) to miles
+      var distanceKm  = log.odometer ? +(log.odometer/1000).toFixed(1) : +(dur*0.6).toFixed(1);
+      var distanceMi  = kmToMi(distanceKm);
+
+      // Skip events below the minimum distance threshold
+      if (distanceMi < MIN_DIST_MI) { skipped++; return; }
+
       var isAssigned   = log.driver && log.driver.id && log.driver.id !== 'NoUserId';
       var hasAnnotation= log.annotations && log.annotations.length > 0;
       var status = isAssigned ? 'assigned' : hasAnnotation ? 'annotated' : 'unassigned';
-      var driverName = null;
-      if (isAssigned) {
-        for (var j=0; j<_drivers.length; j++) {
-          if (_drivers[j].id === log.driver.id) { driverName = _drivers[j].name; break; }
-        }
-        if (!driverName) driverName = log.driver.id;
-      }
-      var annotationText = hasAnnotation ? log.annotations[0].comment : null;
 
-      return {
+      events.push({
         id:           'LOG-' + (i+1),
         vehicle:      vName,
         vehicleColor: vColorMap[vId],
@@ -473,20 +374,20 @@ var unidDash = (function () {
         dateObj:      dt,
         start:        fmtTime(dt.getHours(), dt.getMinutes()),
         durationMin:  dur,
-        distanceKm:   log.odometer ? +(log.odometer/1000).toFixed(1) : +(dur*0.6).toFixed(1),
-        hosRule:      log.hosRuleSet || 'N/A',
+        distanceMi:   distanceMi,
         status:       status,
-        driver:       driverName,
-        annotation:   annotationText,
-        checked:      false,
-        _rawLog:      log    // keep the full object for Set calls
-      };
+        _vehicleId:   vId,
+        _rawLog:      log
+      });
     });
 
+    _allEvents = events;
     _allEvents.sort(function(a,b){ return b.dateObj - a.dateObj; });
     render();
     drawBarChart();
-    toast('Loaded ' + _allEvents.length + ' unidentified logs', '#10b981');
+    var msg = 'Loaded ' + _allEvents.length + ' unidentified logs';
+    if (skipped > 0) msg += ' (' + skipped + ' under ' + MIN_DIST_MI + ' mi hidden)';
+    toast(msg, '#10b981');
   }
 
   /* ── Demo data ───────────────────────────────────────────── */
@@ -499,16 +400,6 @@ var unidDash = (function () {
       {id:'VH-9043',color:'#34d399'},{id:'VH-0175',color:'#c8102e'}
     ];
     _vehicles = vDefs.map(function(v){ return {id:v.id,name:v.id}; });
-    _drivers  = [
-      {id:'d1',name:'J. Harrington'},{id:'d2',name:'M. Delacroix'},
-      {id:'d3',name:'T. Okonkwo'},  {id:'d4',name:'S. Patel'},
-      {id:'d5',name:'R. Vasquez'},  {id:'d6',name:'L. Nguyen'},
-      {id:'d7',name:'K. Brennan'},  {id:'d8',name:'D. Achebe'},
-      {id:'d9',name:'F. Morales'},  {id:'d10',name:'B. Nakamura'}
-    ];
-    var anns=['Vehicle taken home — approved yard move','Pre-trip inspection drive',
-      'Maintenance road test','Driver forgot to log in',
-      'ELD malfunction — manual logs filed','Authorized personal conveyance',null,null,null,null];
     var statusTypes=['unassigned','assigned','annotated'];
     var now=new Date();
     function ri(a,b){return a+Math.floor(Math.random()*(b-a+1));}
@@ -523,20 +414,23 @@ var unidDash = (function () {
       var dt=new Date(yIdx,mIdx,ri(1,dim));
       var sh=ri(4,21),sm=ri(0,59),dur=ri(5,240);
       var veh=ro(vDefs), st=ro(statusTypes);
-      var ann=st==='annotated'?ro(anns.filter(Boolean)):null;
-      var drv=st==='assigned'?ro(_drivers):null;
+      // Randomise distance in miles; ensure a portion falls below threshold to
+      // demo the filter (values 0.05–0.20 mi will be filtered out).
+      var rawMi = +(ri(5,160)*0.1).toFixed(1);  // 0.5 mi – 16 mi range for most
+      if (i % 12 === 0) rawMi = +(Math.random()*0.24).toFixed(2);  // ~8% under threshold
+      if (rawMi < MIN_DIST_MI) continue;  // apply same filter as live data
       _allEvents.push({
         id:'DEMO-'+(10000+i),vehicle:veh.id,vehicleColor:veh.color,
         date:fmtDate(dt),dateObj:dt,start:fmtTime(sh,sm),
-        durationMin:dur,distanceKm:+(dur*ro([0.4,0.5,0.6,0.7,0.8])).toFixed(1),
-        hosRule:ro(_hosRules),status:st,
-        driver:drv?drv.name:null,
-        annotation:ann,checked:false,
-        _rawLog:null  // no raw log in demo mode — API calls are skipped
+        durationMin:dur, distanceMi:rawMi,
+        status:st,
+        _vehicleId: veh.id,
+        _rawLog:null
       });
     }
     _allEvents.sort(function(a,b){return b.dateObj-a.dateObj;});
     render();
+    drawBarChart();
   }
 
   /* ── Public API ──────────────────────────────────────────── */
@@ -544,21 +438,12 @@ var unidDash = (function () {
 
     init: function(api, session) {
       _api           = api;
-      // session.userName is the logged-in user's name; session.userId is their id
-      // Both are used for AnnotationLog authorship.
       _sessionUserId = session && session.userId ? session.userId : null;
+      // Capture the database name for building Geotab deep links
+      _geotabDatabase = session && session.database ? session.database : null;
       var root=document.getElementById('unidentifieddriving');
       if (root) root.style.display='';
-      if (!_initialized) {
-        _initialized=true;
-        document.addEventListener('click', function(ev) {
-          ['driverSearch','bulkDriverSearch'].forEach(function(sid){
-            var s=document.getElementById(sid);
-            var d=document.getElementById(sid.replace('Search','Dropdown'));
-            if(d&&s&&!s.contains(ev.target)&&!d.contains(ev.target)) d.style.display='none';
-          });
-        });
-      }
+      _initialized = true;
       loadFromGeotab();
     },
 
@@ -588,184 +473,13 @@ var unidDash = (function () {
     goPage: function(p){ var t=Math.ceil(_filteredEvents.length/_PER_PAGE)||1; if(p<1||p>t)return; _currentPage=p; renderTable(_filteredEvents); },
     filterGroup: function(g){ _groupFilter=(_groupFilter===g)?null:g; _currentPage=1; render(); },
     clearGroupFilter: function(){ _groupFilter=null; _currentPage=1; render(); },
-    toggleSelectAll: function(cb){
-      var start=(_currentPage-1)*_PER_PAGE;
-      _filteredEvents.slice(start,start+_PER_PAGE).forEach(function(e){ e.checked=cb.checked; });
-      renderTable(_filteredEvents);
-    },
-    checkRow: function(cb,idx){ if(_filteredEvents[idx]) _filteredEvents[idx].checked=cb.checked; updateBulkBtn(); },
-
-    /* ── Resolve panel ── */
-    openPanel: function(idx) {
-      var e=_filteredEvents[idx]; if(!e) return;
-      _openEventIdx=idx;
-      _selectedDriver = e.driver ? (function(){
-        for(var i=0;i<_drivers.length;i++){ if(_drivers[i].name===e.driver) return _drivers[i]; }
-        return { id:null, name:e.driver };
-      })() : null;
-
-      setText('panelEventId',  e.id);
-      setText('panelEventMeta', e.vehicle+' · '+e.date+' · '+e.start+' · '+fmtDur(e.durationMin)+' · '+fmtDist(e.distanceKm));
-
-      var ds=document.getElementById('driverSearch');
-      var dd=document.getElementById('driverDropdown');
-      var sd=document.getElementById('selectedDriverDisplay');
-      var sn=document.getElementById('selectedDriverName');
-      if(ds) ds.value='';
-      if(dd) dd.style.display='none';
-      if(_selectedDriver&&sd&&sn){
-        sd.style.display='flex'; sn.textContent=_selectedDriver.name;
-        if(ds) ds.style.display='none';
-      } else {
-        if(sd) sd.style.display='none';
-        if(ds) ds.style.display='block';
-      }
-      var ta=document.getElementById('annotationNote'); if(ta) ta.value=e.annotation||'';
-      document.querySelectorAll('#presetChips .preset-chip').forEach(function(c){
-        c.classList.toggle('active', c.textContent===(e.annotation||''));
-      });
-      var panel=document.getElementById('panelAssign');
-      if(panel){ panel.classList.add('open'); panel.scrollIntoView({behavior:'smooth',block:'nearest'}); }
-    },
-
-    closePanel: function(){
-      var p=document.getElementById('panelAssign'); if(p) p.classList.remove('open');
-      _openEventIdx=null; _selectedDriver=null;
-    },
-
-    showDriverList: function(){
-      var ds=document.getElementById('driverSearch'),dd=document.getElementById('driverDropdown');
-      if(ds&&dd) buildDriverList(ds,dd,function(id,name){ unidDash.selectDriver(id,name); });
-    },
-    filterDriverList: function(){
-      var ds=document.getElementById('driverSearch'),dd=document.getElementById('driverDropdown');
-      if(ds&&dd) buildDriverList(ds,dd,function(id,name){ unidDash.selectDriver(id,name); });
-    },
-    selectDriver: function(id,name){
-      _selectedDriver={id:id,name:name};
-      var ds=document.getElementById('driverSearch'),dd=document.getElementById('driverDropdown');
-      var sd=document.getElementById('selectedDriverDisplay'),sn=document.getElementById('selectedDriverName');
-      if(dd) dd.style.display='none';
-      if(ds){ ds.value=''; ds.style.display='none'; }
-      if(sn) sn.textContent=name;
-      if(sd) sd.style.display='flex';
-    },
-    clearDriver: function(){
-      _selectedDriver=null;
-      var ds=document.getElementById('driverSearch'),sd=document.getElementById('selectedDriverDisplay');
-      if(ds){ ds.value=''; ds.style.display='block'; }
-      if(sd) sd.style.display='none';
-    },
-
-    setPreset: function(chip){
-      var ta=document.getElementById('annotationNote');
-      document.querySelectorAll('#presetChips .preset-chip').forEach(function(c){ c.classList.remove('active'); });
-      if(ta&&ta.value===chip.textContent){ ta.value=''; } else { chip.classList.add('active'); if(ta) ta.value=chip.textContent; }
-    },
-
-    saveResolve: function() {
-      if(_openEventIdx===null||_saving) return;
-      var e=_filteredEvents[_openEventIdx]; if(!e) return;
-      var note=((document.getElementById('annotationNote')||{}).value||'').trim();
-      if(!_selectedDriver&&!note){ toast('Assign a driver or add a note to resolve this event','#f59e0b'); return; }
-
-      setSaving(true);
-      var driverId   = _selectedDriver ? _selectedDriver.id : null;
-      var driverName = _selectedDriver ? _selectedDriver.name : null;
-
-      persistEvent(e, driverId, note, function(err) {
-        setSaving(false);
-        if (err) {
-          toast('Save failed: '+(err.message||err),'#ef4444');
-          setErr('Failed to save: '+(err.message||JSON.stringify(err)));
-          return;
-        }
-        // Update local state to reflect what was persisted
-        if (driverName) { e.driver=driverName; e.status='assigned'; }
-        if (note)       { e.annotation=note; if(!driverName) e.status='annotated'; }
-        if (e._rawLog && driverId) e._rawLog.driver = { id: driverId };
-
-        unidDash.closePanel();
-        render();
-        toast('Event resolved and saved','#10b981');
-      });
-    },
-
-    /* ── Bulk panel ── */
-    openBulkPanel: function(){
-      var count=_allEvents.filter(function(e){ return e.checked; }).length;
-      if(!count){ toast('Select events first using the checkboxes','#f59e0b'); return; }
-      setText('bulkCount',count+' event'+(count!==1?'s':'')+' selected');
-      _bulkDriver=null;
-      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
-      var bsd=document.getElementById('bulkSelectedDisplay'),bn=document.getElementById('bulkNote');
-      if(bs){ bs.value=''; bs.style.display='block'; }
-      if(bd) bd.style.display='none';
-      if(bsd) bsd.style.display='none';
-      if(bn) bn.value='';
-      var p=document.getElementById('panelBulk');
-      if(p){ p.classList.add('open'); p.scrollIntoView({behavior:'smooth',block:'nearest'}); }
-    },
-    closeBulkPanel: function(){
-      var p=document.getElementById('panelBulk'); if(p) p.classList.remove('open'); _bulkDriver=null;
-    },
-    showBulkDriverList: function(){
-      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
-      if(bs&&bd) buildDriverList(bs,bd,function(id,name){ unidDash.selectBulkDriver(id,name); });
-    },
-    filterBulkDriverList: function(){
-      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
-      if(bs&&bd) buildDriverList(bs,bd,function(id,name){ unidDash.selectBulkDriver(id,name); });
-    },
-    selectBulkDriver: function(id,name){
-      _bulkDriver={id:id,name:name};
-      var bs=document.getElementById('bulkDriverSearch'),bd=document.getElementById('bulkDriverDropdown');
-      var bsd=document.getElementById('bulkSelectedDisplay'),bsn=document.getElementById('bulkSelectedName');
-      if(bd) bd.style.display='none';
-      if(bs){ bs.value=''; bs.style.display='none'; }
-      if(bsn) bsn.textContent=name;
-      if(bsd) bsd.style.display='flex';
-    },
-    clearBulkDriver: function(){
-      _bulkDriver=null;
-      var bs=document.getElementById('bulkDriverSearch'),bsd=document.getElementById('bulkSelectedDisplay');
-      if(bs){ bs.value=''; bs.style.display='block'; }
-      if(bsd) bsd.style.display='none';
-    },
-
-    saveBulkAssign: function(){
-      if(!_bulkDriver||_saving){ toast('Select a driver first','#f59e0b'); return; }
-      var note=((document.getElementById('bulkNote')||{}).value||'').trim();
-      var sel=_allEvents.filter(function(e){ return e.checked; });
-      if(!sel.length){ toast('No events selected','#f59e0b'); return; }
-
-      setSaving(true);
-      var done=0, errors=0;
-      sel.forEach(function(e){
-        persistEvent(e, _bulkDriver.id, note, function(err){
-          if(err){ errors++; } else {
-            e.driver=_bulkDriver.name; e.status='assigned'; e.checked=false;
-            if(note) e.annotation=note;
-            if(e._rawLog) e._rawLog.driver={ id:_bulkDriver.id };
-          }
-          done++;
-          if(done===sel.length){
-            setSaving(false);
-            unidDash.closeBulkPanel();
-            render();
-            if(errors){ toast(errors+' save(s) failed — check console','#ef4444'); }
-            else { toast('Assigned '+sel.length+' event'+(sel.length!==1?'s':'')+' to '+_bulkDriver.name,'#10b981'); }
-          }
-        });
-      });
-    },
 
     /* ── Export ── */
     exportCSV: function(){
       var evts=getFiltered(); if(!evts.length){ toast('No data to export','#ef4444'); return; }
-      var hdr=['ID','Vehicle','Date','Start','Duration (min)','Distance (km)','Status','Driver','Note'];
+      var hdr=['ID','Vehicle','Date','Start','Duration (min)','Distance (mi)','Status','Geotab Link'];
       var rows=evts.map(function(e){
-        return [e.id,e.vehicle,e.date,e.start,e.durationMin,e.distanceKm,e.status,e.driver||'',e.annotation||'']
+        return [e.id,e.vehicle,e.date,e.start,e.durationMin,e.distanceMi.toFixed(1),e.status,buildGeotabLink(e)]
           .map(function(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }).join(',');
       });
       var csv=[hdr.join(',')].concat(rows).join('\n');
@@ -794,8 +508,6 @@ geotab.addin.unidentifieddriving = function () {
     focus: function (freshApi, freshState) {
       _api   = freshApi;
       _state = freshState;
-      // getSession provides the real authenticated session.
-      // Matches the reference add-in pattern exactly — call init here, not in initialize.
       _api.getSession(function (session) {
         unidDash.init(_api, session);
       });

@@ -10,50 +10,53 @@
 
 <div id="unidentifieddriving" style="display:none;">
 
-  <!-- ── Actions hoisted into the dashboard suite header by the parent ── -->
-  <div data-suite-actions style="display:none;">
+  <!-- ── Inline Dashboard Header ── -->
+  <div class="dash-header">
+    <div class="dash-title">Unidentified Driving</div>
+    <div class="dash-actions">
 
-    <!-- Period filter -->
-    <div class="range-group">
-      <button class="range-btn"        onclick="unidDash.setPeriod(1,event)">1M</button>
-      <button class="range-btn active" onclick="unidDash.setPeriod(3,event)">3M</button>
-      <button class="range-btn"        onclick="unidDash.setPeriod(6,event)">6M</button>
+      <!-- Period filter -->
+      <div class="range-group">
+        <button class="range-btn"        onclick="unidDash.setPeriod(1,event)">1M</button>
+        <button class="range-btn active" onclick="unidDash.setPeriod(3,event)">3M</button>
+        <button class="range-btn"        onclick="unidDash.setPeriod(6,event)">6M</button>
+      </div>
+
+      <!-- Status filter -->
+      <div class="range-group">
+        <button class="range-btn active" onclick="unidDash.setStatus('all',event)">All</button>
+        <button class="range-btn"        onclick="unidDash.setStatus('unassigned',event)">Unassigned</button>
+        <button class="range-btn"        onclick="unidDash.setStatus('resolved',event)">Resolved</button>
+      </div>
+
+      <!-- Theme toggle -->
+      <div class="toggle-wrap" onclick="unidDash.toggleTheme()">
+        <div class="toggle-track"><div class="toggle-thumb"></div></div>
+        <span class="toggle-lbl" id="themeLbl">DARK</span>
+      </div>
+
+      <!-- Export -->
+      <button class="btn" onclick="unidDash.exportCSV()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Export CSV
+      </button>
+
+      <!-- Refresh -->
+      <button class="btn" id="btnRefresh" onclick="unidDash.refresh()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+          <path d="M21 3v5h-5"/>
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+          <path d="M8 16H3v5"/>
+        </svg>
+        Refresh
+      </button>
     </div>
-
-    <!-- Status filter -->
-    <div class="range-group">
-      <button class="range-btn active" onclick="unidDash.setStatus('all',event)">All</button>
-      <button class="range-btn"        onclick="unidDash.setStatus('unassigned',event)">Unassigned</button>
-      <button class="range-btn"        onclick="unidDash.setStatus('resolved',event)">Resolved</button>
-    </div>
-
-    <!-- Theme toggle -->
-    <div class="toggle-wrap" onclick="unidDash.toggleTheme()">
-      <div class="toggle-track"><div class="toggle-thumb"></div></div>
-      <span class="toggle-lbl" id="themeLbl">DARK</span>
-    </div>
-
-    <!-- Export -->
-    <button class="btn" onclick="unidDash.exportCSV()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-        <polyline points="7 10 12 15 17 10"/>
-        <line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-      Export CSV
-    </button>
-
-    <!-- Refresh -->
-    <button class="btn" id="btnRefresh" onclick="unidDash.refresh()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-        <path d="M21 3v5h-5"/>
-        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-        <path d="M8 16H3v5"/>
-      </svg>
-      Refresh
-    </button>
-  </div><!-- /data-suite-actions -->
+  </div>
 
   <!-- ── Date range subtitle ── -->
   <div class="sc-sub">
@@ -118,112 +121,6 @@
     </div>
   </div>
 
-  <!-- ── Resolve Panel ── -->
-  <div id="panelOverlay"></div>
-  <div class="panel" id="panelAssign">
-    <div class="panel-header">
-      <div class="panel-title">&#9998; Resolve Event</div>
-      <span class="panel-count" id="panelEventId"></span>
-      <button class="panel-close-btn" onclick="unidDash.closePanel()">&times;</button>
-    </div>
-    <div class="panel-desc" id="panelEventMeta"></div>
-
-    <div class="resolve-grid">
-      <!-- Driver assignment -->
-      <div class="resolve-col">
-        <div class="resolve-col-title">Assign Driver <span class="resolve-optional">(optional)</span></div>
-        <input
-          type="text"
-          class="sched-input"
-          id="driverSearch"
-          placeholder="Type to search drivers…"
-          autocomplete="off"
-          oninput="unidDash.filterDriverList()"
-          onfocus="unidDash.showDriverList()"
-        />
-        <div class="driver-dropdown" id="driverDropdown" style="display:none;"></div>
-        <div class="selected-driver" id="selectedDriverDisplay" style="display:none;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          <span id="selectedDriverName"></span>
-          <button class="clear-btn" onclick="unidDash.clearDriver()">&#10005;</button>
-        </div>
-      </div>
-
-      <!-- Annotation -->
-      <div class="resolve-col">
-        <div class="resolve-col-title">Annotation Note <span class="resolve-optional">(optional)</span></div>
-        <div class="preset-chips" id="presetChips">
-          <button class="preset-chip" onclick="unidDash.setPreset(this)">Vehicle taken home</button>
-          <button class="preset-chip" onclick="unidDash.setPreset(this)">Pre-trip inspection</button>
-          <button class="preset-chip" onclick="unidDash.setPreset(this)">Maintenance road test</button>
-          <button class="preset-chip" onclick="unidDash.setPreset(this)">Driver forgot to log in</button>
-          <button class="preset-chip" onclick="unidDash.setPreset(this)">ELD malfunction — manual logs filed</button>
-          <button class="preset-chip" onclick="unidDash.setPreset(this)">Authorized personal conveyance</button>
-        </div>
-        <textarea
-          class="sched-input resolve-textarea"
-          id="annotationNote"
-          placeholder="Describe why this trip was unidentified…"
-          rows="3"
-        ></textarea>
-      </div>
-    </div>
-
-    <div class="panel-footer">
-      <div class="resolve-hint" id="resolveHint">Assign a driver, add a note, or both — at least one is required.</div>
-      <button class="btn" onclick="unidDash.closePanel()">Cancel</button>
-      <button class="btn btn-save" onclick="unidDash.saveResolve()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
-          <polyline points="20 6 9 17 4 12"/>
-        </svg>
-        Save &amp; Resolve
-      </button>
-    </div>
-  </div><!-- /#panelAssign -->
-
-  <!-- ── Bulk Assign Panel ── -->
-  <div class="panel" id="panelBulk">
-    <div class="panel-header">
-      <div class="panel-title">&#9998; Bulk Assign Driver</div>
-      <span class="panel-count" id="bulkCount"></span>
-      <button class="panel-close-btn" onclick="unidDash.closeBulkPanel()">&times;</button>
-    </div>
-    <div class="panel-desc">Assign a single driver to all selected events. Any existing driver assignments will be overwritten.</div>
-    <div style="max-width:400px;">
-      <div style="margin-bottom:10px;">
-        <label class="field-lbl">Select Driver</label>
-        <input
-          type="text"
-          class="sched-input"
-          id="bulkDriverSearch"
-          placeholder="Type to search drivers…"
-          autocomplete="off"
-          oninput="unidDash.filterBulkDriverList()"
-          onfocus="unidDash.showBulkDriverList()"
-        />
-        <div class="driver-dropdown" id="bulkDriverDropdown" style="display:none;"></div>
-        <div class="selected-driver" id="bulkSelectedDisplay" style="display:none;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          <span id="bulkSelectedName"></span>
-          <button class="clear-btn" onclick="unidDash.clearBulkDriver()">&#10005;</button>
-        </div>
-      </div>
-      <div>
-        <label class="field-lbl">Optional Note</label>
-        <textarea class="sched-input resolve-textarea" id="bulkNote" placeholder="Optional note applied to all selected events…" rows="2"></textarea>
-      </div>
-    </div>
-    <div class="panel-footer">
-      <button class="btn" onclick="unidDash.closeBulkPanel()">Cancel</button>
-      <button class="btn btn-save" onclick="unidDash.saveBulkAssign()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
-          <polyline points="20 6 9 17 4 12"/>
-        </svg>
-        Apply to Selected
-      </button>
-    </div>
-  </div><!-- /#panelBulk -->
-
   <!-- ── Table section ── -->
   <div class="sec-hdr">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -232,15 +129,6 @@
     </div>
     <div class="sec-right">
       <input type="text" class="srch" id="srch" placeholder="Search vehicle…" oninput="unidDash.filterSearch()"/>
-      <button class="btn" id="btnBulk" onclick="unidDash.openBulkPanel()" style="display:none;">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-          <circle cx="9" cy="7" r="4"/>
-          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-        </svg>
-        Bulk Assign (<span id="selCount">0</span>)
-      </button>
     </div>
   </div>
 
